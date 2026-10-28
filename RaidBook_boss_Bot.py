@@ -251,6 +251,8 @@ ATTEND_BUTTON_IDS = ("boss_join", "boss_cancel", "boss_voicecheck")
 LOOT_ANNOUNCE = bool(config.get("loot_announce", not config.get("loot_auction_button", False)))
 # 보스 알림의 💎 득템·경매 — 아이템 입력 한 번으로 득템 기록 + 경매 진행판 자동 진행 (RaidBook_boss_auction)
 LOOT_AUCTION_BUTTON = bool(config.get("loot_auction_button", False))
+# 자동 파티 편성 — 꺼져 있으면 파티확인 버튼을 숨기고 파티 편성/미편성 대신 참석자로 통합 표시 (코드는 유지)
+PARTY_ENABLED = bool(config.get("party_enabled", False))
 # 구버전 방식: 전리품 공지 메시지의 🔨 경매시작 버튼 → 세팅 입력 → ▶️ 시작 (기본 꺼짐)
 LOOT_AUCTION_LEGACY = bool(config.get("loot_auction_legacy", False))
 # 진행판 기본값 "시작가 호가 카운트" (입력 창에 미리 채워짐)
@@ -1890,6 +1892,10 @@ class AttendView(ui.View):
             for child in list(self.children):
                 if getattr(child, "custom_id", None) in ("boss_join", "boss_cancel"):
                     self.remove_item(child)
+        if not PARTY_ENABLED:
+            for child in list(self.children):
+                if getattr(child, "custom_id", None) == "boss_party":
+                    self.remove_item(child)
         if LOOT_AUCTION_BUTTON:
             for child in self.children:
                 if getattr(child, "custom_id", None) == "boss_loot":
@@ -2608,6 +2614,9 @@ def make_attend_embed(boss_name, count, names, boss_time=None, expired=False, lo
         else:
             status = "보스 탐에 참여하실 분은 아래 버튼을 눌러주세요!"
 
+    if not PARTY_ENABLED:
+        confirmed_names = None
+        countdown_text = ""   # 파티 확정 카운트다운
     if confirmed_names is not None:
         # 파티 확정 후: 확정/미확정 분리 표시
         confirmed_count = len(confirmed_names.split(", ")) if confirmed_names and confirmed_names != "없음" else 0
@@ -2701,6 +2710,8 @@ def _boss_alert_content(boss_name, boss_time=None, *, expired=False):
 
 def _schedule_party_confirm_task(attend_view: "AttendView", message_id: int, channel_id: int, boss_time_str: str):
     """보스 리젠 시각 기준 N분 전에 파티 자동 확정 + 1분마다 카운트다운 embed 업데이트."""
+    if not PARTY_ENABLED:
+        return
     confirm_minutes = _party_cfg.get("boss_confirm_minutes_before", 10)
     boss_mins = _parse_boss_time_minutes(boss_time_str)
     if boss_mins is None:
@@ -2998,6 +3009,7 @@ async def _sweep_overdue_alerts():
 
 async def _repair_closed_alert_buttons(limit=300):
     """마감됐는데 인원체크 버튼이 켜진 채 남은 알림 정리 (이전 버전 버그로 다시 켜진 버튼 복구).
+    파티 기능이 꺼져 있으면 마감된 알림의 파티확인 버튼도 함께 숨긴다.
     활성 목록에 없는 = 마감된 알림만 대상, 버튼 상태만 바꾸고 embed·내용은 그대로 둔다."""
     try:
         ch = bot.get_channel(ALERT_CHANNEL_ID) or await bot.fetch_channel(ALERT_CHANNEL_ID)
@@ -3015,7 +3027,8 @@ async def _repair_closed_alert_buttons(limit=300):
                 for c in getattr(row, "children", []):
                     if getattr(c, "custom_id", None):
                         states[c.custom_id] = bool(getattr(c, "disabled", False))
-            if "boss_voicecheck" not in states or states["boss_voicecheck"]:
+            stale_party = "boss_party" in states and not PARTY_ENABLED   # 파티 기능 끔 → 버튼 숨김
+            if "boss_voicecheck" not in states or (states["boss_voicecheck"] and not stale_party):
                 continue
             view = AttendView(boss_name=" ", boss_time=" ", loot="", expired=True)
             view.message_id = msg.id

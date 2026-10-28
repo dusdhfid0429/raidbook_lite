@@ -25,6 +25,7 @@
   "loot_auction_legacy": false,
   "auction_defaults": "10만 1만 5초",
   "auction_pending_list": true,
+  "party_enabled": false,
   "auction_pending_days": 3,
   "_auction_defaults_comment": "진행판 기본값 '시작가 호가 카운트' — 입력 창에 미리 채워지고, 줄마다 숫자를 생략하면 이 값 사용",
   "auction_channel_id": null,
