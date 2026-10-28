@@ -2996,6 +2996,42 @@ async def _sweep_overdue_alerts():
                  f"(예정 {close_at.strftime('%m-%d %H:%M')})")
 
 
+async def _repair_closed_alert_buttons(limit=300):
+    """마감됐는데 인원체크 버튼이 켜진 채 남은 알림 정리 (이전 버전 버그로 다시 켜진 버튼 복구).
+    활성 목록에 없는 = 마감된 알림만 대상, 버튼 상태만 바꾸고 embed·내용은 그대로 둔다."""
+    try:
+        ch = bot.get_channel(ALERT_CHANNEL_ID) or await bot.fetch_channel(ALERT_CHANNEL_ID)
+    except Exception as e:
+        log.info(f"[마감 버튼 정리] 알림 채널 조회 실패: {type(e).__name__}: {e}")
+        return
+    active = set(load_active_messages().keys())
+    fixed = 0
+    try:
+        async for msg in ch.history(limit=limit):
+            if msg.author.id != bot.user.id or str(msg.id) in active:
+                continue
+            states = {}
+            for row in msg.components:
+                for c in getattr(row, "children", []):
+                    if getattr(c, "custom_id", None):
+                        states[c.custom_id] = bool(getattr(c, "disabled", False))
+            if "boss_voicecheck" not in states or states["boss_voicecheck"]:
+                continue
+            view = AttendView(boss_name=" ", boss_time=" ", loot="", expired=True)
+            view.message_id = msg.id
+            if states.get("boss_party") is False:
+                view._apply_confirmed_button_state()
+            try:
+                await msg.edit(view=view)
+                fixed += 1
+            except Exception as e:
+                log.info(f"[마감 버튼 정리] {msg.id} 수정 실패: {type(e).__name__}: {e}")
+    except Exception as e:
+        log.info(f"[마감 버튼 정리] 기록 조회 실패: {type(e).__name__}: {e}")
+    if fixed:
+        log.info(f"[마감 버튼 정리] 마감된 알림 {fixed}개의 인원체크 버튼을 껐어요")
+
+
 async def _close_sweep_loop():
     while True:
         await asyncio.sleep(60)
@@ -5284,6 +5320,7 @@ async def initialize_on_ready():
     global _close_sweep_task
     if _close_sweep_task is None or _close_sweep_task.done():
         _close_sweep_task = asyncio.ensure_future(_close_sweep_loop())
+        asyncio.ensure_future(_repair_closed_alert_buttons())
     global _pending_loop_task
     if PENDING_LIST_ENABLED and (_pending_loop_task is None or _pending_loop_task.done()):
         _pending_loop_task = asyncio.ensure_future(_pending_refresh_loop())
