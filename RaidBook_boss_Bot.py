@@ -42,7 +42,16 @@ from RaidBook_boss_data import (
     upsert_attendance_records as _upsert_attendance_records_core,
     upsert_loot_record as _upsert_loot_record_core,
 )
-from RaidBook_boss_auction import AuctionSetupModal, AuctionView, BossAuction
+from RaidBook_boss_auction import (
+    AuctionSetupModal,
+    AuctionView,
+    BoardView,
+    BossAuction,
+    board_results_text,
+    format_board_defaults,
+    parse_board_defaults,
+    parse_board_lots,
+)
 from RaidBook_loot import (
     begin_loot_processing,
     bump_loot_revision,
@@ -233,8 +242,14 @@ VOICE_CHECK_AT_SPAWN = bool(config.get("voice_check_at_spawn", True))
 HIDE_ATTEND_BUTTONS = bool(config.get("hide_attend_buttons", False))
 # 마감 시 비활성화되는 참석 계열 버튼
 ATTEND_BUTTON_IDS = ("boss_join", "boss_cancel", "boss_voicecheck")
-# 전리품 공지 메시지에 경매시작 버튼 표시 (보스봇 카운트다운 경매 — RaidBook_boss_auction)
+# 보스 알림의 💎 득템·경매 — 아이템 입력 한 번으로 득템 기록 + 경매 진행판 자동 진행 (RaidBook_boss_auction)
 LOOT_AUCTION_BUTTON = bool(config.get("loot_auction_button", False))
+# 구버전 방식: 전리품 공지 메시지의 🔨 경매시작 버튼 → 세팅 입력 → ▶️ 시작 (기본 꺼짐)
+LOOT_AUCTION_LEGACY = bool(config.get("loot_auction_legacy", False))
+# 진행판 기본값 "시작가 호가 카운트" (입력 창에 미리 채워짐), 첫 아이템 시작 대기·아이템 간 간격(초)
+AUCTION_DEFAULTS = parse_board_defaults(config.get("auction_defaults", ""))
+AUCTION_START_DELAY = int(config.get("auction_start_delay_sec", 10) or 0)
+AUCTION_GAP = int(config.get("auction_gap_sec", 3) or 0)
 AUCTION_CHANNEL_ID = int(config.get("auction_channel_id") or 0)
 AUCTION_CURRENCY = str(config.get("auction_currency", "아데나") or "")
 # 설정된 채널이 없거나 삭제됐으면 시작 시 "RaidBook" 카테고리에 자동 생성 (채널 관리 권한 필요)
@@ -1155,7 +1170,7 @@ async def _post_or_update_loot_announcement(
         source_label="보스",
         body_line="용사들이 전리품을 획득했습니다!",
         jump_label="알림 메시지로 이동",
-        view=LootAuctionView() if LOOT_AUCTION_BUTTON else None,
+        view=LootAuctionView() if LOOT_AUCTION_LEGACY else None,
     )
 
 
@@ -1315,203 +1330,316 @@ class LootModal(ui.Modal, title="획득 아이템 기록"):
         # 획득자 파싱 (쉼표/줄바꿈 구분 → 쉼표 조인)
         acquirers_list = [x.strip() for x in re.split(r'[,\n]+', self.acquirer_input.value or "") if x.strip()]
         new_acquirers = ", ".join(acquirers_list)
-        editor = interaction.user.display_name
-        guild_id = interaction.guild_id
-
         # 응답을 즉시 defer — 이후 작업은 followup으로
         await interaction.response.defer(ephemeral=True)
-
-        if get_loot_revision(v.message_id) != self.opened_revision:
-            await interaction.followup.send(loot_busy_message(), ephemeral=True)
-            return
-        if not begin_loot_processing(v.message_id):
-            await interaction.followup.send(loot_busy_message(), ephemeral=True)
-            return
-
-        should_bump_revision = False
-        old_loot = ""
-        existing_ann = ""
-        loot_changed = False
+        ack = await _commit_loot_record(v, interaction, new_text, new_acquirers, self.opened_revision)
         try:
-            # 원본 보스 알림 메시지 fetch (ephemeral 경유 시 interaction.message가 다를 수 있음)
-            boss_msg = None
-            try:
-                ch = bot.get_channel(v.channel_id) if hasattr(v, 'channel_id') and v.channel_id else interaction.channel
-                if ch and v.message_id:
-                    boss_msg = await ch.fetch_message(int(v.message_id))
-            except Exception:
-                pass
+            await interaction.followup.send(ack or loot_busy_message(), ephemeral=True)
+        except Exception:
+            pass
 
-            async with v._view_lock:
-                # 기존 공지 메시지 ID 및 기존 아이템 텍스트 확인.
-                # lock 안에서 읽어야 동시/중복 submit이 직전 저장값을 기준으로 판정된다.
-                old_loot, _, excel_ann = load_loot_from_excel(v.message_id)
-                active_info = load_active_messages().get(str(v.message_id), {})
-                state_ann = (
-                    str(getattr(v, "loot_announcement_id", "") or "")
-                    or str(active_info.get("loot_announcement_id", "") or "")
-                    or str(active_info.get("announcement_msg_id", "") or "")
-                )
-                existing_ann = state_ann or (excel_ann or "")
-                if existing_ann:
-                    v.loot_announcement_id = str(existing_ann)
-                old_acquirers = (load_loot_acquirers_from_excel(v.message_id) or "").strip()
-                loot_changed = (new_text != (old_loot or "").strip()) or (new_acquirers != old_acquirers)
-                v.loot = new_text
-                v.loot_acquirers = new_acquirers
 
-                was_active = not getattr(v, "expired", False)
+async def _commit_loot_record(v, interaction, new_text, new_acquirers, opened_revision):
+    """획득 아이템 기록 공통 처리 — 알림 embed 갱신·Excel 저장·득템 채널 공지.
+    호출 전에 interaction 응답(defer)을 끝내야 한다. 반환: 안내문 (다른 사람이 동시에 수정 중이면 None)."""
+    if get_loot_revision(v.message_id) != opened_revision:
+        return None
+    if not begin_loot_processing(v.message_id):
+        return None
 
-                # ── 1단계: 활성 메시지 처리 ──────────────────────────────────────
-                if was_active:
-                    try:
-                        v.attendees = v._verify_attendees_from_log()
-                    except Exception as e:
-                        log.info(f"[획득아이템 참석자 검증 실패] {e}")
-                    # 메시지는 활성 유지 — embed에 loot만 반영 (Excel 저장보다 먼저 → 화면 반응 우선)
-                    _id_to_name = _load_id_to_name_mapping()
-                    names = ", ".join(_id_to_name.get(u, u) for u in v.attendees) if v.attendees else "없음"
-                    try:
-                        target_msg = boss_msg or interaction.message
-                        image_filename, image_url = _message_image_ref(target_msg)
-                        if image_filename:
-                            v.image_filename = image_filename
-                        if image_url:
-                            v.image_url = image_url
-                        image_file, image_kwargs = _boss_image_file_and_kwargs(v.boss_name, target_msg)
-                        embed = make_attend_embed(v.boss_name, len(v.attendees), names, v.boss_time,
-                                                  expired=False, loot=new_text, disable_time=v.disable_time,
-                                                  loot_acquirers=new_acquirers, **image_kwargs)
-                        await _edit_message_with_image(
-                            target_msg,
-                            embed=embed,
-                            view=v,
-                            image_file=image_file,
-                            content=_boss_alert_content(v.boss_name, v.boss_time),
-                        )
-                    except Exception:
-                        pass
-                    # 참석자 Excel 저장 (유실 방지)
-                    try:
-                        await save_boss_attendees_to_excel(
-                            v.message_id, v.boss_name, v.boss_time,
-                            v.attendees, v.created_date)
-                        log.info(f"[획득아이템 저장] {v.boss_name} {v.boss_time} {v.message_id} | "
-                                 f"참석 {len(v.attendees)}명 Excel 저장")
-                    except Exception as e:
-                        log.info(f"[획득아이템 참석자 저장 실패] {e}")
-                    # JSON의 loot · attendees 갱신
-                    try:
-                        active = load_active_messages()
-                        if str(v.message_id) in active:
-                            active[str(v.message_id)]["loot"] = new_text
-                            active[str(v.message_id)]["loot_acquirers"] = new_acquirers
-                            active[str(v.message_id)]["attendees"] = list(v.attendees)
-                            active[str(v.message_id)]["loot_announcement_id"] = getattr(v, "loot_announcement_id", "") or ""
-                            if getattr(v, "image_url", ""):
-                                active[str(v.message_id)]["image_url"] = v.image_url
-                            if getattr(v, "image_filename", ""):
-                                active[str(v.message_id)]["image_filename"] = v.image_filename
-                            write_active_messages(active)
-                    except Exception:
-                        pass
-                else:
-                    # 이미 마감된 메시지 — embed에 loot만 반영
-                    _id_to_name = _load_id_to_name_mapping()
-                    names = ", ".join(_id_to_name.get(u, u) for u in v.attendees) if v.attendees else "없음"
-                    try:
-                        target_msg = boss_msg or interaction.message
-                        image_filename, image_url = _message_image_ref(target_msg)
-                        if image_filename:
-                            v.image_filename = image_filename
-                        if image_url:
-                            v.image_url = image_url
-                        image_file, image_kwargs = _boss_image_file_and_kwargs(v.boss_name, target_msg)
-                        embed = make_attend_embed(v.boss_name, len(v.attendees), names, v.boss_time,
-                                                  expired=True, loot=new_text, disable_time=v.disable_time,
-                                                  loot_acquirers=new_acquirers, **image_kwargs)
-                        await _edit_message_with_image(
-                            target_msg,
-                            embed=embed,
-                            view=v,
-                            image_file=image_file,
-                            content=_boss_alert_content(v.boss_name, v.boss_time, expired=True),
-                        )
-                    except Exception:
-                        pass
+    editor = interaction.user.display_name
+    guild_id = interaction.guild_id
+    should_bump_revision = False
+    old_loot = ""
+    existing_ann = ""
+    loot_changed = False
+    try:
+        # 원본 보스 알림 메시지 fetch (ephemeral 경유 시 interaction.message가 다를 수 있음)
+        boss_msg = None
+        try:
+            ch = bot.get_channel(v.channel_id) if hasattr(v, 'channel_id') and v.channel_id else interaction.channel
+            if ch and v.message_id:
+                boss_msg = await ch.fetch_message(int(v.message_id))
+        except Exception:
+            pass
 
-                # ── 2단계: 획득 아이템 Excel 저장 ─────────────────────────────────
-                ok, _ = await save_boss_loot_to_excel(v.message_id, v.boss_name, v.boss_time, new_text, editor,
-                                                      acquirers=new_acquirers)
-                should_bump_revision = ok and loot_changed
+        async with v._view_lock:
+            # 기존 공지 메시지 ID 및 기존 아이템 텍스트 확인.
+            # lock 안에서 읽어야 동시/중복 submit이 직전 저장값을 기준으로 판정된다.
+            old_loot, _, excel_ann = load_loot_from_excel(v.message_id)
+            active_info = load_active_messages().get(str(v.message_id), {})
+            state_ann = (
+                str(getattr(v, "loot_announcement_id", "") or "")
+                or str(active_info.get("loot_announcement_id", "") or "")
+                or str(active_info.get("announcement_msg_id", "") or "")
+            )
+            existing_ann = state_ann or (excel_ann or "")
+            if existing_ann:
+                v.loot_announcement_id = str(existing_ann)
+            old_acquirers = (load_loot_acquirers_from_excel(v.message_id) or "").strip()
+            loot_changed = (new_text != (old_loot or "").strip()) or (new_acquirers != old_acquirers)
+            v.loot = new_text
+            v.loot_acquirers = new_acquirers
 
-            # ── 3단계: 득템 채널 공지 발행/수정/삭제 ──────────────────────────────
-            is_loot_update = bool((old_loot or "").strip())
-            announcement_id = existing_ann
-            # 아이템이 같아도 공지가 없으면(채널 변경·삭제 등) 다시 게시되도록 항상 확인
-            if new_text:
-                announcement_id = await _post_or_update_loot_announcement(
+            was_active = not getattr(v, "expired", False)
+
+            # ── 1단계: 활성 메시지 처리 ──────────────────────────────────────
+            if was_active:
+                try:
+                    v.attendees = v._verify_attendees_from_log()
+                except Exception as e:
+                    log.info(f"[획득아이템 참석자 검증 실패] {e}")
+                # 메시지는 활성 유지 — embed에 loot만 반영 (Excel 저장보다 먼저 → 화면 반응 우선)
+                _id_to_name = _load_id_to_name_mapping()
+                names = ", ".join(_id_to_name.get(u, u) for u in v.attendees) if v.attendees else "없음"
+                try:
+                    target_msg = boss_msg or interaction.message
+                    image_filename, image_url = _message_image_ref(target_msg)
+                    if image_filename:
+                        v.image_filename = image_filename
+                    if image_url:
+                        v.image_url = image_url
+                    image_file, image_kwargs = _boss_image_file_and_kwargs(v.boss_name, target_msg)
+                    embed = make_attend_embed(v.boss_name, len(v.attendees), names, v.boss_time,
+                                              expired=False, loot=new_text, disable_time=v.disable_time,
+                                              loot_acquirers=new_acquirers, **image_kwargs)
+                    await _edit_message_with_image(
+                        target_msg,
+                        embed=embed,
+                        view=v,
+                        image_file=image_file,
+                        content=_boss_alert_content(v.boss_name, v.boss_time),
+                    )
+                except Exception:
+                    pass
+                # 참석자 Excel 저장 (유실 방지)
+                try:
+                    await save_boss_attendees_to_excel(
+                        v.message_id, v.boss_name, v.boss_time,
+                        v.attendees, v.created_date)
+                    log.info(f"[획득아이템 저장] {v.boss_name} {v.boss_time} {v.message_id} | "
+                             f"참석 {len(v.attendees)}명 Excel 저장")
+                except Exception as e:
+                    log.info(f"[획득아이템 참석자 저장 실패] {e}")
+                # JSON의 loot · attendees 갱신
+                try:
+                    active = load_active_messages()
+                    if str(v.message_id) in active:
+                        active[str(v.message_id)]["loot"] = new_text
+                        active[str(v.message_id)]["loot_acquirers"] = new_acquirers
+                        active[str(v.message_id)]["attendees"] = list(v.attendees)
+                        active[str(v.message_id)]["loot_announcement_id"] = getattr(v, "loot_announcement_id", "") or ""
+                        if getattr(v, "image_url", ""):
+                            active[str(v.message_id)]["image_url"] = v.image_url
+                        if getattr(v, "image_filename", ""):
+                            active[str(v.message_id)]["image_filename"] = v.image_filename
+                        write_active_messages(active)
+                except Exception:
+                    pass
+            else:
+                # 이미 마감된 메시지 — embed에 loot만 반영
+                _id_to_name = _load_id_to_name_mapping()
+                names = ", ".join(_id_to_name.get(u, u) for u in v.attendees) if v.attendees else "없음"
+                try:
+                    target_msg = boss_msg or interaction.message
+                    image_filename, image_url = _message_image_ref(target_msg)
+                    if image_filename:
+                        v.image_filename = image_filename
+                    if image_url:
+                        v.image_url = image_url
+                    image_file, image_kwargs = _boss_image_file_and_kwargs(v.boss_name, target_msg)
+                    embed = make_attend_embed(v.boss_name, len(v.attendees), names, v.boss_time,
+                                              expired=True, loot=new_text, disable_time=v.disable_time,
+                                              loot_acquirers=new_acquirers, **image_kwargs)
+                    await _edit_message_with_image(
+                        target_msg,
+                        embed=embed,
+                        view=v,
+                        image_file=image_file,
+                        content=_boss_alert_content(v.boss_name, v.boss_time, expired=True),
+                    )
+                except Exception:
+                    pass
+
+            # ── 2단계: 획득 아이템 Excel 저장 ─────────────────────────────────
+            ok, _ = await save_boss_loot_to_excel(v.message_id, v.boss_name, v.boss_time, new_text, editor,
+                                                  acquirers=new_acquirers)
+            should_bump_revision = ok and loot_changed
+
+        # ── 3단계: 득템 채널 공지 발행/수정/삭제 ──────────────────────────────
+        is_loot_update = bool((old_loot or "").strip())
+        announcement_id = existing_ann
+        # 아이템이 같아도 공지가 없으면(채널 변경·삭제 등) 다시 게시되도록 항상 확인
+        if new_text:
+            announcement_id = await _post_or_update_loot_announcement(
+                v.message_id, v.boss_name, v.boss_time, new_text, editor,
+                guild_id, existing_announcement_id=existing_ann or None,
+                # 기존 공지를 못 찾으면(득템 채널 변경 등) 새로 게시 — 중복은 jump 링크 검색으로 방지
+                create_if_missing=True,
+                acquirers=new_acquirers,
+            )
+            if announcement_id and str(announcement_id) != (existing_ann or ""):
+                await save_boss_loot_to_excel(
                     v.message_id, v.boss_name, v.boss_time, new_text, editor,
-                    guild_id, existing_announcement_id=existing_ann or None,
-                    # 기존 공지를 못 찾으면(득템 채널 변경 등) 새로 게시 — 중복은 jump 링크 검색으로 방지
-                    create_if_missing=True,
-                    acquirers=new_acquirers,
+                    announcement_msg_id=announcement_id,
                 )
-                if announcement_id and str(announcement_id) != (existing_ann or ""):
+            if announcement_id:
+                v.loot_announcement_id = str(announcement_id)
+                update_active_message_loot(v.message_id, new_text, announcement_id)
+                if str(announcement_id) == (existing_ann or "") and loot_changed:
                     await save_boss_loot_to_excel(
                         v.message_id, v.boss_name, v.boss_time, new_text, editor,
                         announcement_msg_id=announcement_id,
                     )
-                if announcement_id:
-                    v.loot_announcement_id = str(announcement_id)
-                    update_active_message_loot(v.message_id, new_text, announcement_id)
-                    if str(announcement_id) == (existing_ann or "") and loot_changed:
-                        await save_boss_loot_to_excel(
-                            v.message_id, v.boss_name, v.boss_time, new_text, editor,
-                            announcement_msg_id=announcement_id,
-                        )
-            elif not new_text and loot_changed and (existing_ann or is_loot_update):
-                await _delete_loot_announcement_common(
-                    bot=bot,
-                    loot_channel_id=LOOT_CHANNEL_ID,
-                    source_message_id=v.message_id,
-                    existing_announcement_id=existing_ann or None,
-                    subject_name=v.boss_name,
-                    subject_time=v.boss_time,
-                    logger=log,
-                    log_prefix="득템 공지",
-                    source_label="보스",
-                )
-                await save_boss_loot_to_excel(
-                    v.message_id, v.boss_name, v.boss_time, "", editor,
-                    announcement_msg_id="", acquirers="",
-                )
-                v.loot_announcement_id = ""
-                v.loot_acquirers = ""
-                update_active_message_loot(v.message_id, "", "")
-                announcement_id = None
+        elif not new_text and loot_changed and (existing_ann or is_loot_update):
+            await _delete_loot_announcement_common(
+                bot=bot,
+                loot_channel_id=LOOT_CHANNEL_ID,
+                source_message_id=v.message_id,
+                existing_announcement_id=existing_ann or None,
+                subject_name=v.boss_name,
+                subject_time=v.boss_time,
+                logger=log,
+                log_prefix="득템 공지",
+                source_label="보스",
+            )
+            await save_boss_loot_to_excel(
+                v.message_id, v.boss_name, v.boss_time, "", editor,
+                announcement_msg_id="", acquirers="",
+            )
+            v.loot_announcement_id = ""
+            v.loot_acquirers = ""
+            update_active_message_loot(v.message_id, "", "")
+            announcement_id = None
 
-            log.info(f"[획득아이템 기록] {v.boss_name} {v.boss_time} {v.message_id} | 편집자: {editor} | 내용: {new_text[:80]}")
-            # ── 4단계: 완료 응답            # ── 5단계: 완료 응답 ─────────────────────────────────────────────
-            if new_text:
-                ack = f"✏️ {editor}님, 획득 아이템 기록을 저장했어요."
+        log.info(f"[획득아이템 기록] {v.boss_name} {v.boss_time} {v.message_id} | 편집자: {editor} | 내용: {new_text[:80]}")
+        # ── 4단계: 완료 응답            # ── 5단계: 완료 응답 ─────────────────────────────────────────────
+        if new_text:
+            ack = f"✏️ {editor}님, 획득 아이템 기록을 저장했어요."
+        else:
+            ack = f"🧹 {editor}님, 획득 아이템 기록을 비웠어요."
+        if not ok:
+            ack += "\n⚠️ 단, 엑셀 저장은 실패했어요. 엑셀이 열려있는지 확인해 주세요."
+        if new_text and announcement_id is None:
+            if is_loot_update:
+                ack += "\n⚠️ 기존 득템 채널 공지를 찾지 못해 새 공지는 만들지 않았어요."
             else:
-                ack = f"🧹 {editor}님, 획득 아이템 기록을 비웠어요."
-            if not ok:
-                ack += "\n⚠️ 단, 엑셀 저장은 실패했어요. 엑셀이 열려있는지 확인해 주세요."
-            if new_text and announcement_id is None:
-                if is_loot_update:
-                    ack += "\n⚠️ 기존 득템 채널 공지를 찾지 못해 새 공지는 만들지 않았어요."
-                else:
-                    ack += "\n⚠️ 득템 채널 공지는 실패했어요. (채널 권한/존재 여부 확인)"
-            try:
-                await interaction.followup.send(ack, ephemeral=True)
-            except Exception:
-                pass
-        finally:
-            if should_bump_revision:
-                bump_loot_revision(v.message_id)
-            end_loot_processing(v.message_id)
+                ack += "\n⚠️ 득템 채널 공지는 실패했어요. (채널 권한/존재 여부 확인)"
+        return ack
+    finally:
+        if should_bump_revision:
+            bump_loot_revision(v.message_id)
+        end_loot_processing(v.message_id)
+
+
+
+def _split_record_items(text):
+    return [x.strip() for x in re.split(r"[,\n]+", text or "") if x.strip()]
+
+
+class LootBoardModal(ui.Modal, title="💎 득템 · 경매"):
+    """한 번에 득템 기록 + 경매 진행판 생성. 경매할 아이템과 기록만 할 아이템을 칸으로 구분."""
+
+    def __init__(self, parent_view: "AttendView", opened_revision: int = 0, prefill_record: str = ""):
+        super().__init__()
+        self.parent_view = parent_view
+        self.opened_revision = opened_revision
+        self.auction_input = ui.TextInput(
+            label="🔨 경매할 아이템 (한 줄에 하나)",
+            style=discord.TextStyle.paragraph, required=False, max_length=1500,
+            placeholder="이름 [xN] [시작가] [호가] [N초]\n집행검 100만 10만\n반지 x2 30만 5만 10초\n목걸이   ← 숫자 생략 시 기본값",
+        )
+        self.record_input = ui.TextInput(
+            label="📦 기록만 할 아이템 (경매 없음)",
+            style=discord.TextStyle.paragraph, required=False, max_length=1000,
+            placeholder="쉼표 또는 줄바꿈 구분. 예: 엘릭서 x5, 주문서",
+            default=prefill_record[:1000],
+        )
+        self.defaults_input = ui.TextInput(
+            label="기본값: 시작가 호가 카운트",
+            style=discord.TextStyle.short, required=False, max_length=60,
+            default=format_board_defaults(AUCTION_DEFAULTS),
+        )
+        for x in (self.auction_input, self.record_input, self.defaults_input):
+            self.add_item(x)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        v = self.parent_view
+        defaults = parse_board_defaults(self.defaults_input.value, AUCTION_DEFAULTS)
+        try:
+            lots, auction_names = parse_board_lots(self.auction_input.value, defaults)
+        except ValueError as e:
+            await interaction.response.send_message(
+                f"❌ {e}\n입력한 내용 (복사해서 다시 쓰세요):\n```\n{self.auction_input.value[:1500]}\n```",
+                ephemeral=True)
+            return
+        if lots and boss_auction.find_open_board(v.message_id):
+            await interaction.response.send_message(
+                "⏳ 이 보스탐의 경매가 아직 진행 중이에요. 끝난 뒤 다시 등록해 주세요.", ephemeral=True)
+            return
+        items = auction_names + _split_record_items(self.record_input.value)
+        if not items:
+            await interaction.response.send_message("❌ 아이템을 하나 이상 적어 주세요.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        ack = await _commit_loot_record(v, interaction, ", ".join(items),
+                                        getattr(v, "loot_acquirers", "") or "", self.opened_revision)
+        if ack is None:
+            await interaction.followup.send(loot_busy_message(), ephemeral=True)
+            return
+        if lots:
+            _, text, _ = await boss_auction.create_board(
+                lots, boss_name=v.boss_name, boss_time=v.boss_time,
+                source_message_id=v.message_id, creator=interaction.user)
+            ack += "\n" + text
+        await interaction.followup.send(ack, ephemeral=True)
+
+
+class LootBoardOpenView(discord.ui.View):
+    """마감된 알림은 데이터 조회에 시간이 걸려 모달을 바로 못 띄우므로 버튼 한 번 거친다."""
+
+    def __init__(self, parent_view: "AttendView", opened_revision: int, prefill_record: str):
+        super().__init__(timeout=300)
+        self.parent_view = parent_view
+        self.opened_revision = opened_revision
+        self.prefill_record = prefill_record
+
+    @ui.button(label="입력창 열기", emoji="💎", style=discord.ButtonStyle.primary)
+    async def open_btn(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_modal(
+            LootBoardModal(self.parent_view, self.opened_revision, self.prefill_record))
+
+
+async def _apply_board_results(board):
+    """진행판이 끝나면 결과를 원본 보스 알림(embed)과 득템 기록(Excel 획득자 칸)에 남긴다."""
+    mid = board.get("source_message_id")
+    results = board_results_text(board)
+    if not mid or not results:
+        return
+    info = load_active_messages().get(str(mid))
+    if info is not None:
+        boss_name, boss_time, loot = info.get("boss_name", ""), info.get("boss_time", ""), info.get("loot", "")
+        with active_messages_lock:
+            data = load_active_messages()
+            if str(mid) in data:
+                data[str(mid)]["loot_acquirers"] = results
+                write_active_messages(data)
+    else:
+        bundle = await asyncio.to_thread(load_expired_message_bundle, int(mid))
+        boss_name, boss_time, loot = bundle["boss_name"], bundle["boss_time"], bundle["loot"]
+    await save_boss_loot_to_excel(int(mid), boss_name, boss_time, loot, "경매", acquirers=results)
+    # 알림 embed의 결과 줄만 바꿔 다시 그림 (버튼·이미지는 그대로)
+    try:
+        ch = bot.get_channel(ALERT_CHANNEL_ID) or await bot.fetch_channel(ALERT_CHANNEL_ID)
+        msg = await ch.fetch_message(int(mid))
+        if msg.embeds:
+            embed = msg.embeds[0]
+            desc = re.sub(r"\n(👤 \*\*획득자\*\*|🏆 \*\*경매 결과\*\*): [^\n]*", "", embed.description or "")
+            embed.description = f"{desc}\n🏆 **경매 결과**: {results}"
+            await _edit_message_with_image(msg, embed=embed)
+    except Exception as e:
+        log.info(f"[진행판 결과 → 알림 갱신 실패] {mid}: {type(e).__name__}: {e}")
+    log.info(f"[진행판 결과 반영] {boss_name} {boss_time} {mid} | {results[:120]}")
 
 
 class AttendView(ui.View):
@@ -1546,6 +1674,11 @@ class AttendView(ui.View):
             for child in list(self.children):
                 if getattr(child, "custom_id", None) in ("boss_join", "boss_cancel"):
                     self.remove_item(child)
+        if LOOT_AUCTION_BUTTON:
+            for child in self.children:
+                if getattr(child, "custom_id", None) == "boss_loot":
+                    child.label = "득템·경매"
+                    child.emoji = "💎"
         # 파티 확인 버튼 초기 비활성
         for child in self.children:
             if getattr(child, "custom_id", None) == "boss_party":
@@ -1916,6 +2049,51 @@ class AttendView(ui.View):
         except Exception:
             pass
 
+    def _is_loot_attendee(self, user):
+        uid = str(user.id)
+        canonical_uid = _resolve_uid(uid)
+        if uid in self.attendees or canonical_uid in {_resolve_uid(a) for a in self.attendees}:
+            return True
+        return uid in LOOT_FORCE_USER_IDS or canonical_uid in LOOT_FORCE_USER_IDS
+
+    async def _open_loot_board(self, interaction: discord.Interaction):
+        """💎 득템·경매 — 진행 중 알림은 입력창을 바로 띄우고(1클릭), 마감된 알림은 조회 후 버튼으로 연다."""
+        msg_id = interaction.message.id
+        info = load_active_messages().get(str(msg_id))
+        if info is not None:
+            self.attendees = list(info.get("attendees", []))
+            self.boss_name = info.get("boss_name", "") or self.boss_name
+            self.boss_time = info.get("boss_time", "") or self.boss_time
+            self.loot = info.get("loot", "") or ""
+            self.loot_acquirers = info.get("loot_acquirers", "") or ""
+            self.loot_announcement_id = info.get("loot_announcement_id", "") or self.loot_announcement_id
+            self.expired = False
+            if not (self._is_loot_attendee(interaction.user) or _is_bot_admin(interaction.user)):
+                await interaction.response.send_message(
+                    "🤔 이 보스에 참석한 사람만 득템을 기록할 수 있어요.", ephemeral=True)
+                return
+            await interaction.response.send_modal(
+                LootBoardModal(self, get_loot_revision(msg_id), self.loot or ""))
+            return
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            return
+        bundle = await asyncio.to_thread(load_expired_message_bundle, msg_id)
+        self.attendees = bundle["attendees"]
+        self.boss_name = bundle["boss_name"] or self.boss_name
+        self.boss_time = bundle["boss_time"] or self.boss_time
+        self.loot = bundle["loot"]
+        self.loot_acquirers = bundle["loot_acquirers"]
+        self.loot_announcement_id = bundle["loot_announcement_id"]
+        self.expired = True
+        if not (self._is_loot_attendee(interaction.user) or _is_bot_admin(interaction.user)):
+            await interaction.followup.send("🤔 이 보스에 참석한 사람만 득템을 기록할 수 있어요.", ephemeral=True)
+            return
+        await interaction.followup.send(
+            "💎 마감된 알림이에요. 아래 버튼으로 입력창을 열어 주세요.",
+            view=LootBoardOpenView(self, get_loot_revision(msg_id), self.loot or ""), ephemeral=True)
+
     @ui.button(label="획득 아이템", style=discord.ButtonStyle.primary, custom_id="boss_loot")
     async def loot_button(self, interaction: discord.Interaction, button: ui.Button):
         # persistent view는 모든 메시지가 같은 인스턴스를 공유하므로,
@@ -1926,6 +2104,9 @@ class AttendView(ui.View):
             return
         self.message_id = msg_id
         self.channel_id = interaction.channel_id  # on_submit에서 원본 메시지 fetch에 사용
+        if LOOT_AUCTION_BUTTON:
+            await self._open_loot_board(interaction)
+            return
         # 마감 메시지의 Excel 재로드가 3초를 넘길 수 있어 응답을 먼저 예약
         try:
             await interaction.response.defer(ephemeral=True)
@@ -2191,7 +2372,8 @@ def make_attend_embed(boss_name, count, names, boss_time=None, expired=False, lo
     if loot:
         desc += f"\n\n🎁 **획득 아이템**: {loot}"
         if loot_acquirers:
-            desc += f"\n👤 **획득자**: {loot_acquirers}"
+            label = "🏆 **경매 결과**" if LOOT_AUCTION_BUTTON else "👤 **획득자**"
+            desc += f"\n{label}: {loot_acquirers}"
     embed.description = desc
     _apply_embed_image(embed, thumbnail_file=thumbnail_file, image_url=image_url, image_filename=image_filename)
     return embed
@@ -2574,6 +2756,9 @@ def _is_bot_admin(member) -> bool:
 boss_auction = BossAuction(bot, channel_id=AUCTION_CHANNEL_ID, data_dir=DATA_DIR,
                            is_admin=_is_bot_admin, logger=log, currency=AUCTION_CURRENCY,
                            get_attendees=_boss_attendees_for)
+boss_auction.board_start_delay = AUCTION_START_DELAY
+boss_auction.board_gap = AUCTION_GAP
+boss_auction.on_board_finished = _apply_board_results
 
 
 @bot.check
@@ -4765,6 +4950,7 @@ async def initialize_on_ready():
     bot.add_view(AttendView())
     bot.add_view(LootAuctionView())  # 전리품 공지 경매시작 버튼 재시작 복구
     bot.add_view(AuctionView(boss_auction))  # 경매 메시지 버튼 재시작 복구
+    bot.add_view(BoardView(boss_auction))  # 경매 진행판 버튼 재시작 복구
     await boss_auction.restore()
     await _sync_slash_commands()
     now = datetime.now()

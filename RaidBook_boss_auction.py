@@ -3,7 +3,7 @@
 RaidBook_boss_auction.py
 보스봇 전리품 경매 (카운트다운 방식, 포인트 연동 없음).
 
-흐름
+흐름 (단일 경매 — 진행판은 파일 아래쪽 "경매 진행판" 참고)
   1) 전리품 공지의 🔨 경매시작 → 세팅 입력(물품·카운트 초·시작가·호가) → 완료
      → 경매 채널에 '대기' 상태 경매 메시지 게시
   2) 경매 메시지의 ▶️ 경매시작 → 진행 상태 전환
@@ -178,6 +178,10 @@ class BossAuction:
         self.lock = asyncio.Lock()
         self._close_tasks = {}
         self.clock_offset = 0.0   # PC 시계 − Discord 시계 (초)
+        # 경매 진행판 — 첫 아이템 시작 대기·아이템 사이 간격(초), 전체 종료 콜백 async (board) -> None
+        self.board_start_delay = 10
+        self.board_gap = 3
+        self.on_board_finished = None
 
     def click_ts(self, interaction):
         """버튼을 누른 순간의 Discord 시각(unix). PC 시계 차이도 함께 갱신."""
@@ -191,6 +195,8 @@ class BossAuction:
         return time.time() - self.clock_offset
 
     def view_for(self, rec):
+        if (rec or {}).get("type") == "board":
+            return BoardView(self, closed=rec.get("status") == "closed")
         return AuctionView(self, state=(rec or {}).get("status", "closed"))
 
     async def load_allowed(self, source_message_id):
@@ -290,10 +296,121 @@ class BossAuction:
 
     async def restore(self):
         """재시작 후 진행 중 경매의 마감 타이머 재등록 (마감 지난 건 즉시 낙찰)."""
-        for mid, rec in self.store.load().items():
-            if rec.get("status") == "active":
+        for mid, rec in list(self.store.load().items()):
+            if rec.get("type") == "board":
+                if rec.get("status") == "active":
+                    self._schedule_board(mid, rec)
+                    self.log.info(f"[진행판 복구] {rec.get('boss_name')} {rec.get('boss_time')} | msg {mid}")
+            elif rec.get("status") == "active":
                 self._schedule_close(mid, rec)
                 self.log.info(f"[경매 복구] {rec.get('item')} | msg {mid}")
+
+    # ── 경매 진행판 ──────────────────────────────────────────────────────
+    async def _auction_channel(self):
+        if not self.channel_id:
+            return None, "❌ 경매 채널이 설정되지 않았어요. (boss_config: auction_channel_id)"
+        ch = self.bot.get_channel(self.channel_id)
+        if ch is None:
+            try:
+                ch = await self.bot.fetch_channel(self.channel_id)
+            except Exception:
+                return None, "❌ 경매 채널을 찾을 수 없어요. 봇의 채널 보기 권한을 확인해 주세요."
+        return ch, ""
+
+    def find_open_board(self, source_message_id):
+        """같은 보스 알림에서 아직 진행 중인 진행판 메시지ID (없으면 None)."""
+        for mid, rec in self.store.load().items():
+            if (rec.get("type") == "board" and rec.get("status") == "active"
+                    and str(rec.get("source_message_id")) == str(source_message_id)):
+                return mid
+        return None
+
+    async def create_board(self, lots, *, boss_name, boss_time, source_message_id, creator):
+        """진행판 게시 후 board_start_delay 뒤 첫 아이템 자동 시작. 반환: (ok, 안내문, 메시지)."""
+        ch, err = await self._auction_channel()
+        if ch is None:
+            return False, err, None
+        board = {
+            "type": "board", "status": "active", "current": None, "lots": lots,
+            "boss_name": boss_name, "boss_time": boss_time, "channel_id": self.channel_id,
+            "source_message_id": str(source_message_id) if source_message_id else None,
+            "allowed_uids": await self.load_allowed(source_message_id),
+            "creator_id": str(creator.id), "creator_name": creator.display_name,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        board_start_next(board, self.discord_now() + self.board_start_delay)
+        try:
+            msg = await ch.send(embed=build_board_embed(board, self.currency, self.discord_now()),
+                                view=self.view_for(board))
+        except discord.Forbidden:
+            return False, (f"❌ 경매 채널 <#{self.channel_id}> 에 메시지를 보낼 권한이 없어요. "
+                           f"봇에게 채널 보기·메시지 보내기·링크 첨부 권한을 주세요."), None
+        self.store.save(msg.id, board)
+        self._schedule_board(msg.id, board)
+        self.log.info(f"[진행판 등록] {boss_name} {boss_time} | {len(lots)}건 | 등록자 {creator.display_name} | msg {msg.id}")
+        return True, f"🔨 경매 {len(lots)}건 진행판 → {msg.jump_url} ({self.board_start_delay}초 뒤 자동 시작)", msg
+
+    def _schedule_board(self, mid, board):
+        lot = board_current(board)
+        dl = close_deadline(lot) if lot else None
+        old = self._close_tasks.pop(str(mid), None)
+        if old and not old.done():
+            old.cancel()
+        if dl is None:
+            return
+        expected = (board.get("current"), lot.get("bid_count"))
+
+        async def _run():
+            try:
+                await asyncio.sleep(max(0.0, dl + CLOSE_GRACE_SEC - self.discord_now()))
+                await self.advance_board(mid, expected=expected)
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                self.log.info(f"[진행판 자동 진행 실패] {mid}: {type(e).__name__}: {e}")
+
+        self._close_tasks[str(mid)] = asyncio.ensure_future(_run())
+
+    async def advance_board(self, mid, *, expected=None, by=None, stop=False):
+        """현재 아이템 마감(낙찰/유찰) → 다음 아이템 시작. stop=True 면 남은 아이템 취소 후 종료.
+        expected=(현재 순번, 입찰 수)가 주어지면 그 사이 입찰·진행이 있었을 때 무시. 반환: 마감된 lot."""
+        async with self.lock:
+            board = self.store.get(mid)
+            if not board or board.get("status") == "closed":
+                return None
+            lot = board_current(board)
+            if expected is not None and (board.get("current"), (lot or {}).get("bid_count")) != expected:
+                return None
+            closed_lot = board_close_current(board, by=by)
+            if stop:
+                for x in board.get("lots") or []:
+                    if x.get("status") == "pending":
+                        x["status"] = "cancelled"
+            next_lot = board_start_next(board, self.discord_now() + self.board_gap)
+            self.store.save(mid, board)
+        if next_lot is None:
+            self._close_tasks.pop(str(mid), None)
+        else:
+            self._schedule_board(mid, board)
+        try:
+            ch = self.bot.get_channel(int(board["channel_id"])) or await self.bot.fetch_channel(int(board["channel_id"]))
+            msg = await ch.fetch_message(int(mid))
+            await msg.edit(embed=build_board_embed(board, self.currency, self.discord_now()), view=self.view_for(board))
+            if closed_lot and closed_lot.get("bidder_id"):
+                await ch.send(f"🏁 **{lot_label(closed_lot)}** 낙찰 — <@{closed_lot['bidder_id']}> "
+                              f"**{int(closed_lot['current_price']):,}**{' ' + self.currency if self.currency else ''}",
+                              reference=msg, mention_author=False)
+        except Exception as e:
+            self.log.info(f"[진행판 메시지 갱신 실패] {mid}: {type(e).__name__}: {e}")
+        if closed_lot:
+            self.log.info(f"[진행판 마감] {lot_label(closed_lot)} | 낙찰 {closed_lot.get('bidder_name') or '유찰'} "
+                          f"{int(closed_lot.get('current_price') or 0):,} | 입찰 {closed_lot.get('bid_count', 0)}회 | msg {mid}")
+        if next_lot is None and self.on_board_finished:
+            try:
+                await self.on_board_finished(board)
+            except Exception as e:
+                self.log.info(f"[진행판 결과 반영 실패] {mid}: {type(e).__name__}: {e}")
+        return closed_lot
 
 
 class AuctionSetupModal(ui.Modal, title="경매 세팅"):
@@ -411,4 +528,297 @@ class AuctionView(ui.View):
         text = "이미 종료된 경매예요." if rec is None else (
             f"⏹️ 경매를 종료했어요 — 낙찰 {rec['bidder_name']} {int(rec['current_price']):,}"
             if rec.get("bidder_id") else "⏹️ 경매를 종료했어요 (유찰).")
+        await interaction.followup.send(text, ephemeral=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  경매 진행판 — 한 보스탐에서 나온 여러 아이템을 메시지 하나에서 순서대로 경매
+# ══════════════════════════════════════════════════════════════════════════
+#  보스 알림의 💎 득템·경매 입력 한 번으로 생성되고, 별도 시작 버튼 없이
+#  start_delay 뒤 첫 아이템부터 자동 진행한다. 아이템(lot)마다 시작가·호가·카운트가
+#  다를 수 있고, 마감되면 gap 뒤 다음 아이템이 자동 시작된다.
+#  lot 은 단일 경매 rec 과 같은 키를 써서 next_bid_price/apply_bid/close_deadline 을 재사용한다.
+#  저장: boss_auction_state.json 에 {진행판 메시지ID: board} (board["type"] == "board").
+
+MAX_BOARD_LOTS = 25
+MAX_LOT_QTY = 20
+DEFAULT_BOARD_DEFAULTS = {"start_price": 100_000, "increment": 10_000, "countdown_sec": 5}
+
+
+def fmt_amount_kr(value):
+    """1300000 → '130만', 150000000 → '1억5,000만', 단위로 안 떨어지면 콤마 표기."""
+    v = int(value or 0)
+    if v >= 100_000_000 and v % 10_000 == 0:
+        eok, man = divmod(v // 10_000, 10_000)
+        return f"{eok:,}억" + (f"{man:,}만" if man else "")
+    if v >= 10_000 and v % 10_000 == 0:
+        return f"{v // 10_000:,}만"
+    return f"{v:,}"
+
+
+def _amount_token(token):
+    """줄 끝 금액 토큰 판정 — 단위(억/만/천)가 있거나 1,000 이상인 숫자만 금액으로 본다
+    (아이템 이름 끝의 작은 숫자, 예: '룬 3' 을 금액으로 오인하지 않도록)."""
+    amt = parse_amount_kr(token)
+    if amt is None or amt <= 0:
+        return None
+    if re.search(r"[억만천]", token) or amt >= 1000:
+        return amt
+    return None
+
+
+def parse_board_defaults(text, fallback=None):
+    """'10만 1만 5초' → {start_price, increment, countdown_sec}. 빠진 값은 fallback."""
+    out = dict(fallback or DEFAULT_BOARD_DEFAULTS)
+    amounts = []
+    for tok in str(text or "").replace("/", " ").replace(",", " ").split():
+        m = re.fullmatch(r"(\d+)초", tok)
+        if m:
+            out["countdown_sec"] = int(m.group(1))
+            continue
+        amt = parse_amount_kr(tok)
+        if amt:
+            amounts.append(amt)
+    if amounts:
+        out["start_price"] = amounts[0]
+    if len(amounts) > 1:
+        out["increment"] = amounts[1]
+    return out
+
+
+def format_board_defaults(d):
+    return f"{fmt_amount_kr(d['start_price'])} {fmt_amount_kr(d['increment'])} {int(d['countdown_sec'])}초"
+
+
+def parse_lot_line(line, defaults):
+    """'반지 x2 30만 5만 10초' → (이름, 수량, 시작가, 호가, 카운트). 해석 불가 시 ValueError."""
+    tokens = str(line or "").replace(" / ", " ").replace("/", " ").split()
+    qty, countdown, amounts = 1, None, []
+    while len(tokens) > 1:
+        t = tokens[-1]
+        m_sec = re.fullmatch(r"(\d+)초", t)
+        m_qty = re.fullmatch(r"(?:[xX×*](\d+)|(\d+)개)", t)
+        if m_sec and countdown is None:
+            countdown = int(m_sec.group(1))
+        elif m_qty and qty == 1:
+            qty = int(m_qty.group(1) or m_qty.group(2))
+        elif len(amounts) < 2 and _amount_token(t) is not None:
+            amounts.insert(0, _amount_token(t))
+        else:
+            break
+        tokens.pop()
+    name = " ".join(tokens).strip()
+    m = re.fullmatch(r"(.*?)\s*[xX×*](\d+)", name)
+    if m and m.group(1) and qty == 1:
+        name, qty = m.group(1).strip(), int(m.group(2))
+    if not name:
+        raise ValueError(f"아이템 이름이 없어요: `{line}`")
+    start = amounts[0] if amounts else int(defaults["start_price"])
+    inc = amounts[1] if len(amounts) > 1 else int(defaults["increment"])
+    cd = countdown if countdown is not None else int(defaults["countdown_sec"])
+    if not 1 <= qty <= MAX_LOT_QTY:
+        raise ValueError(f"수량은 1~{MAX_LOT_QTY}개로 적어 주세요: `{line}`")
+    if not 1 <= cd <= 3600:
+        raise ValueError(f"카운트는 1~3600초로 적어 주세요: `{line}`")
+    if start <= 0 or inc <= 0:
+        raise ValueError(f"시작가·호가를 확인해 주세요: `{line}`")
+    return name, qty, start, inc, cd
+
+
+def parse_board_lots(text, defaults):
+    """여러 줄 → lot 목록 (수량만큼 펼침). 반환: (lots, 이름 목록 'xN' 포함)."""
+    lots, names = [], []
+    for raw in re.split(r"[\n]+", str(text or "")):
+        line = raw.strip().strip(",")
+        if not line:
+            continue
+        name, qty, start, inc, cd = parse_lot_line(line, defaults)
+        names.append(f"{name} x{qty}" if qty > 1 else name)
+        for i in range(qty):
+            lots.append({
+                "item": name, "unit": f"{i + 1}/{qty}" if qty > 1 else "",
+                "start_price": start, "increment": inc, "countdown_sec": cd,
+                "current_price": 0, "bidder_id": None, "bidder_name": "", "bid_count": 0,
+                "last_bid_at": None, "started_ts": None, "status": "pending",
+            })
+    if len(lots) > MAX_BOARD_LOTS:
+        raise ValueError(f"경매는 한 번에 {MAX_BOARD_LOTS}개까지 올릴 수 있어요 (지금 {len(lots)}개).")
+    return lots, names
+
+
+def lot_label(lot):
+    return f"{lot['item']} ({lot['unit']})" if lot.get("unit") else lot["item"]
+
+
+def board_current(board):
+    idx = board.get("current")
+    lots = board.get("lots") or []
+    if idx is None or not 0 <= idx < len(lots):
+        return None
+    return lots[idx]
+
+
+def board_start_next(board, start_ts):
+    """다음 대기 lot 을 start_ts 에 시작하도록 활성화. 남은 lot 이 없으면 진행판 종료. 반환: lot 또는 None."""
+    for i, lot in enumerate(board.get("lots") or []):
+        if lot.get("status") == "pending":
+            lot["status"] = "active"
+            lot["started_ts"] = float(start_ts)
+            board["current"] = i
+            return lot
+    board["current"] = None
+    board["status"] = "closed"
+    board["closed_at"] = datetime.now().isoformat(timespec="seconds")
+    return None
+
+
+def board_close_current(board, by=None):
+    """현재 lot 낙찰/유찰 처리. 반환: 마감된 lot 또는 None."""
+    lot = board_current(board)
+    if not lot or lot.get("status") != "active":
+        return None
+    lot["status"] = "closed"
+    lot["closed_at"] = datetime.now().isoformat(timespec="seconds")
+    if by:
+        lot["closed_by"] = by
+    return lot
+
+
+def board_results_text(board, currency=""):
+    """보스 알림에 남길 한 줄 요약: '집행검 홍길동 130만 · 반지 (1/2) 유찰'."""
+    parts = []
+    for lot in board.get("lots") or []:
+        st = lot.get("status")
+        if st == "closed" and lot.get("bidder_id"):
+            parts.append(f"{lot_label(lot)} {lot.get('bidder_name')} {fmt_amount_kr(lot['current_price'])}")
+        elif st == "closed":
+            parts.append(f"{lot_label(lot)} 유찰")
+        elif st == "cancelled":
+            parts.append(f"{lot_label(lot)} 취소")
+    return " · ".join(parts)
+
+
+def build_board_embed(board, currency="", now=None):
+    unit = f" {currency}" if currency else ""
+    now = time.time() if now is None else now
+    lots = board.get("lots") or []
+    closed = board.get("status") == "closed"
+    head = f"{board.get('boss_name', '')} {board.get('boss_time', '')}".strip()
+    embed = discord.Embed(
+        title=f"🏁 경매 완료 — {head}" if closed else f"🔨 경매 진행판 — {head}",
+        color=0x1d9e75 if closed else 0xf0b232)
+    lines = []
+    for lot in lots:
+        st = lot.get("status")
+        label = lot_label(lot)
+        if st == "closed" and lot.get("bidder_id"):
+            lines.append(f"✅ **{label}** — {lot.get('bidder_name')} **{fmt_amount_kr(lot['current_price'])}**")
+        elif st == "closed":
+            lines.append(f"⚪ {label} — 유찰")
+        elif st == "cancelled":
+            lines.append(f"⛔ {label} — 취소")
+        elif st == "active":
+            lines.append(f"▶️ **{label}** — 진행 중")
+        else:
+            lines.append(f"⏳ {label} · 시작 {fmt_amount_kr(lot['start_price'])} / 호가 {fmt_amount_kr(lot['increment'])}")
+    desc = "\n".join(lines) or "(아이템 없음)"
+    if len(desc) > 3900:
+        desc = desc[:3900] + "\n…"
+    embed.description = desc
+    lot = board_current(board)
+    if lot and not closed:
+        embed.add_field(name="🔨 지금 경매", value=f"**{lot_label(lot)}**", inline=False)
+        embed.add_field(name="시작가", value=f"{int(lot['start_price']):,}{unit}", inline=True)
+        embed.add_field(name="호가", value=f"{int(lot['increment']):,}{unit}", inline=True)
+        embed.add_field(name="카운트", value=f"{lot['countdown_sec']}초", inline=True)
+        if lot.get("bidder_id"):
+            embed.add_field(name="최고 입찰자", value=f"**{lot['bidder_name']}**", inline=True)
+            embed.add_field(name="현재가", value=f"**{int(lot['current_price']):,}{unit}**", inline=True)
+        else:
+            embed.add_field(name="현재가", value="아직 입찰 없음", inline=True)
+        started = float(lot.get("started_ts") or 0)
+        if started > now:
+            embed.add_field(name="⏳ 시작", value=f"<t:{int(started) + 1}:R>", inline=False)
+        else:
+            dl = close_deadline(lot)
+            if dl:
+                embed.add_field(name="⏱️ 마감", value=f"<t:{int(dl) + 1}:R>", inline=False)
+        if board.get("source_message_id"):
+            embed.add_field(name="🔐 입찰 자격", value="해당 보스탐 참석자만 입찰할 수 있어요.", inline=False)
+    done = sum(1 for x in lots if x.get("status") in ("closed", "cancelled"))
+    tail = "🙋 입찰을 누르면 호가만큼 올라갑니다" if not closed else "모든 경매가 끝났어요"
+    embed.set_footer(text=f"{done}/{len(lots)} 완료 · {tail} · 등록자 {board.get('creator_name', '-')}")
+    return embed
+
+
+class BoardView(ui.View):
+    """경매 진행판 버튼 (persistent): 🙋 입찰 / ⏭️ 다음 (관리자) / ⏹️ 종료 (관리자)."""
+
+    def __init__(self, auction: BossAuction, closed=False):
+        super().__init__(timeout=None)
+        self.auction = auction
+        if closed:
+            for child in self.children:
+                child.disabled = True
+
+    @ui.button(label="입찰", emoji="🙋", style=discord.ButtonStyle.success, custom_id="boss_board_bid")
+    async def bid_btn(self, interaction: discord.Interaction, button: ui.Button):
+        a = self.auction
+        mid = interaction.message.id
+        clicked = a.click_ts(interaction)   # 판정 기준 = 누른 순간
+        async with a.lock:
+            board = a.store.get(mid)
+            lot = board_current(board) if board else None
+            if not lot or board.get("status") != "active":
+                await interaction.response.send_message("경매가 끝났어요.", ephemeral=True)
+                return
+            started = float(lot.get("started_ts") or 0)
+            if clicked < started:
+                await interaction.response.send_message(
+                    f"⏳ **{lot_label(lot)}** 경매는 <t:{int(started) + 1}:R> 시작해요.", ephemeral=True)
+                return
+            dl = close_deadline(lot)
+            if dl is not None and clicked >= dl:
+                await interaction.response.send_message("⏰ 카운트가 끝난 뒤 눌렀어요. 마감 처리됩니다.", ephemeral=True)
+                return
+            if not a.can_bid(board, interaction.user.id):
+                await interaction.response.send_message(
+                    "🔐 이 경매는 해당 보스탐 참석자만 입찰할 수 있어요.", ephemeral=True)
+                return
+            ok, text = apply_bid(lot, interaction.user.id, interaction.user.display_name, now=clicked)
+            if not ok:
+                await interaction.response.send_message(text, ephemeral=True)
+                return
+            a.store.save(mid, board)
+            await interaction.response.edit_message(embed=build_board_embed(board, a.currency, a.discord_now()),
+                                                    view=a.view_for(board))
+            a._schedule_board(mid, board)
+        a.log.info(f"[진행판 입찰] {lot_label(lot)} | {interaction.user.display_name}({interaction.user.id}) "
+                   f"{int(lot['current_price']):,} | {lot['bid_count']}회 | msg {mid}")
+
+    @ui.button(label="다음", emoji="⏭️", style=discord.ButtonStyle.secondary, custom_id="boss_board_skip")
+    async def skip_btn(self, interaction: discord.Interaction, button: ui.Button):
+        a = self.auction
+        if not a.is_admin(interaction.user):
+            await interaction.response.send_message("⛔ 관리자만 다음 아이템으로 넘길 수 있어요.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        lot = await a.advance_board(interaction.message.id, by=interaction.user.display_name)
+        if lot is None:
+            text = "이미 끝난 경매예요."
+        elif lot.get("bidder_id"):
+            text = f"⏭️ {lot_label(lot)} 마감 — 낙찰 {lot['bidder_name']} {int(lot['current_price']):,}"
+        else:
+            text = f"⏭️ {lot_label(lot)} 유찰 처리하고 다음으로 넘겼어요."
+        await interaction.followup.send(text, ephemeral=True)
+
+    @ui.button(label="종료", emoji="⏹️", style=discord.ButtonStyle.secondary, custom_id="boss_board_stop")
+    async def stop_btn(self, interaction: discord.Interaction, button: ui.Button):
+        a = self.auction
+        if not a.is_admin(interaction.user):
+            await interaction.response.send_message("⛔ 관리자만 경매를 종료할 수 있어요.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        lot = await a.advance_board(interaction.message.id, by=interaction.user.display_name, stop=True)
+        text = "이미 끝난 경매예요." if lot is None else "⏹️ 진행판을 종료했어요. 남은 아이템은 취소됐어요."
         await interaction.followup.send(text, ephemeral=True)
