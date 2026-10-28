@@ -16,6 +16,8 @@ RaidBook Lite — 보스 알림/인원체크/경매만 남긴 경량판. 원본(
 ## 검증
 ```bash
 python Tests/test_boss_auction.py
+python Tests/test_boss_board.py
+python Tests/test_bid_burst.py
 python -m pyflakes *.py
 ```
 

@@ -442,22 +442,87 @@ def remove_active_message(message_id):
         write_active_messages(data)
 
 
-def load_active_messages():
-    """활성 메시지 목록 로드"""
-    with active_messages_lock:
-        if not os.path.exists(ACTIVE_MESSAGES_PATH):
-            return {}
+_active_cache = None   # 마지막으로 정상 읽기/쓰기한 내용 — 이 파일은 이 프로세스만 쓰므로 가장 최신이다
+
+
+def _read_active_file():
+    """active_messages.json 읽기. 백신·백업 프로그램이 잠깐 잡고 있으면 짧게 재시도."""
+    import time as _time
+    last = None
+    for attempt in range(4):
         try:
             with open(ACTIVE_MESSAGES_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except FileNotFoundError:
+            return {}
         except Exception as e:
-            log.info(f"[활성 메시지 로드 실패] {e}")
+            last = e
+            _time.sleep(0.05 * (attempt + 1))
+    raise last
+
+
+def load_active_messages():
+    """활성 메시지 목록 로드.
+    파일을 못 읽으면 빈 목록 대신 마지막 정상 내용을 돌려준다 — 빈 목록을 받아 수정·저장하면
+    다른 알림의 참석자가 통째로 지워지기 때문. 처음부터 손상돼 있으면 손상 파일을 따로 보관한다."""
+    global _active_cache
+    import copy as _copy
+    with active_messages_lock:
+        try:
+            data = _read_active_file()
+            _active_cache = _copy.deepcopy(data)
+            return data
+        except Exception as e:
+            if _active_cache is not None:
+                log.info(f"[활성 메시지 로드 실패 → 마지막 정상 내용 사용] {type(e).__name__}: {e}")
+                return _copy.deepcopy(_active_cache)
+            log.info(f"[활성 메시지 로드 실패] {type(e).__name__}: {e}")
+            try:
+                import shutil as _shutil
+                _shutil.copy2(ACTIVE_MESSAGES_PATH,
+                              f"{ACTIVE_MESSAGES_PATH}.corrupt-{datetime.now().strftime('%Y%m%d%H%M%S')}")
+            except Exception:
+                pass
             return {}
 
 
 def write_active_messages(data):
     """활성 메시지를 임시 파일에 쓴 뒤 원자적으로 교체."""
-    write_json_atomic(ACTIVE_MESSAGES_PATH, data, log)
+    global _active_cache
+    import copy as _copy
+    with active_messages_lock:
+        write_json_atomic(ACTIVE_MESSAGES_PATH, data, log)
+        _active_cache = _copy.deepcopy(data)
+
+
+def patch_active_message(message_id, **fields):
+    """활성 메시지의 일부 필드만 갱신 (읽기→수정→저장을 잠금 안에서 — 그 사이 추가된 참석자 보존).
+    반환: 갱신 여부 (활성 목록에 없으면 False)."""
+    with active_messages_lock:
+        data = load_active_messages()
+        key = str(message_id)
+        if key not in data:
+            return False
+        data[key].update(fields)
+        write_active_messages(data)
+        return True
+
+
+def merge_active_attendees(message_id, attendees):
+    """활성 메시지 참석자에 합치기 (기존 순서 유지, 빠진 사람은 지우지 않음). 반환: 합친 목록 또는 None."""
+    with active_messages_lock:
+        data = load_active_messages()
+        key = str(message_id)
+        if key not in data:
+            return None
+        current = list(data[key].get("attendees", []))
+        added = [str(u) for u in attendees if str(u) not in current]
+        if added:
+            current.extend(added)
+            data[key]["attendees"] = current
+            write_active_messages(data)
+        return current
 
 
 def upsert_active_message_info(message_id, info):
@@ -1444,20 +1509,20 @@ async def _commit_loot_record(v, interaction, new_text, new_acquirers, opened_re
                 except Exception as e:
                     log.info(f"[획득아이템 참석자 저장 실패] {e}")
                 # JSON의 loot · attendees 갱신
+                # 참석자는 덮어쓰지 않고 합친다 — 입력창을 연 사이 인원체크로 추가된 참석자 유실 방지
                 try:
-                    active = load_active_messages()
-                    if str(v.message_id) in active:
-                        active[str(v.message_id)]["loot"] = new_text
-                        active[str(v.message_id)]["loot_acquirers"] = new_acquirers
-                        active[str(v.message_id)]["attendees"] = list(v.attendees)
-                        active[str(v.message_id)]["loot_announcement_id"] = getattr(v, "loot_announcement_id", "") or ""
-                        if getattr(v, "image_url", ""):
-                            active[str(v.message_id)]["image_url"] = v.image_url
-                        if getattr(v, "image_filename", ""):
-                            active[str(v.message_id)]["image_filename"] = v.image_filename
-                        write_active_messages(active)
-                except Exception:
-                    pass
+                    fields = {"loot": new_text, "loot_acquirers": new_acquirers,
+                              "loot_announcement_id": getattr(v, "loot_announcement_id", "") or ""}
+                    if getattr(v, "image_url", ""):
+                        fields["image_url"] = v.image_url
+                    if getattr(v, "image_filename", ""):
+                        fields["image_filename"] = v.image_filename
+                    if patch_active_message(v.message_id, **fields):
+                        merged = merge_active_attendees(v.message_id, v.attendees)
+                        if merged is not None:
+                            v.attendees = merged
+                except Exception as e:
+                    log.info(f"[획득아이템 JSON 갱신 실패] {v.message_id}: {type(e).__name__}: {e}")
             else:
                 # 이미 마감된 메시지 — embed에 loot만 반영
                 _id_to_name = _load_id_to_name_mapping()
@@ -4615,7 +4680,7 @@ async def extend(ctx, message_id: str, minutes: int = 20):
 
     new_disable_time = datetime.now() + timedelta(minutes=minutes)
     info["disable_time"] = new_disable_time.strftime("%Y-%m-%d %H:%M:%S")
-    upsert_active_message_info(message_id, info)
+    patch_active_message(message_id, disable_time=info["disable_time"])
 
     channel = bot.get_channel(ALERT_CHANNEL_ID)
     try:
@@ -4648,7 +4713,9 @@ async def extend(ctx, message_id: str, minutes: int = 20):
             info["image_url"] = attend_view.image_url
         if attend_view.loot_announcement_id:
             info["loot_announcement_id"] = attend_view.loot_announcement_id
-        upsert_active_message_info(message_id, info)
+        patch_active_message(message_id, image_filename=info.get("image_filename", ""),
+                             image_url=info.get("image_url", ""),
+                             loot_announcement_id=info.get("loot_announcement_id", ""))
         # 새 마감 시각이 적용된 embed 로 갱신 (카운트다운이 즉시 갱신됨)
         names = ", ".join(attend_view.attendees) if attend_view.attendees else "없음"
         try:
@@ -5398,7 +5465,8 @@ async def initialize_on_ready():
         if image_url:
             attend_view.image_url = image_url
             info["image_url"] = image_url
-        upsert_active_message_info(msg_id_str, info)
+        patch_active_message(msg_id_str, image_filename=info.get("image_filename", ""),
+                             image_url=info.get("image_url", ""))
         attendee_count = len(attend_view.attendees)
 
         # 파티 미확정 상태면 확정 타이머 재등록

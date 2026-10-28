@@ -106,11 +106,24 @@ class AuctionStore:
         if self._data is None:
             data = {}
             if os.path.exists(self.path):
-                try:
-                    with open(self.path, encoding="utf-8") as f:
-                        data = json.load(f)
-                except Exception:
-                    data = {}
+                for attempt in range(4):
+                    try:
+                        with open(self.path, encoding="utf-8") as f:
+                            data = json.load(f)
+                        break
+                    except Exception as e:
+                        if attempt < 3:
+                            time.sleep(0.05 * (attempt + 1))
+                            continue
+                        # 손상 — 빈 상태로 덮어쓰기 전에 원본을 따로 보관 (진행 중 경매 기록 보존)
+                        data = {}
+                        try:
+                            import shutil
+                            shutil.copy2(self.path, f"{self.path}.corrupt-{datetime.now().strftime('%Y%m%d%H%M%S')}")
+                        except Exception:
+                            pass
+                        if self.log:
+                            self.log.info(f"[경매 상태 파일 손상 — 원본 보관 후 새로 시작] {type(e).__name__}: {e}")
             self._data = data if isinstance(data, dict) else {}
         return self._data
 
@@ -194,6 +207,31 @@ class BossAuction:
 
     def discord_now(self):
         return time.time() - self.clock_offset
+
+    def safe_save(self, mid, rec):
+        """저장 실패해도 입찰은 메모리에 남아 다음 저장 때 함께 기록된다 — 클릭 처리를 막지 않는다."""
+        try:
+            self.store.save(mid, rec)
+        except Exception as e:
+            self.log.info(f"[경매 저장 실패 — 다음 저장 때 재기록] {mid}: {type(e).__name__}: {e}")
+
+    async def respond_ephemeral(self, interaction, text):
+        try:
+            await interaction.response.send_message(text, ephemeral=True)
+        except (discord.NotFound, discord.HTTPException) as e:
+            self.log.info(f"[경매 응답 실패] {type(e).__name__}: {e}")
+
+    async def respond_edit(self, interaction, **kwargs):
+        """버튼 응답으로 메시지 갱신. 응답 시한을 넘겼으면 메시지를 직접 수정 (입찰은 이미 반영됨)."""
+        try:
+            await interaction.response.edit_message(**kwargs)
+            return
+        except (discord.NotFound, discord.HTTPException) as e:
+            self.log.info(f"[경매 응답 지연 → 메시지 직접 수정] {type(e).__name__}: {e}")
+        try:
+            await interaction.message.edit(**kwargs)
+        except Exception as e:
+            self.log.info(f"[경매 메시지 수정 실패] {type(e).__name__}: {e}")
 
     def view_for(self, rec):
         if (rec or {}).get("type") == "board":
@@ -542,28 +580,33 @@ class AuctionView(ui.View):
         a = self.auction
         mid = interaction.message.id
         clicked = a.click_ts(interaction)   # 판정 기준 = 누른 순간 (처리 지연과 무관)
+        # 잠금 안에서는 판정·저장만 하고 Discord 응답은 밖에서 — 연타가 몰려도 뒤 클릭이 3초 응답 시한을 넘기지 않도록
+        reject, rec = None, None
         async with a.lock:
             rec = a.store.get(mid)
             if not rec:
-                await interaction.response.send_message("경매 정보를 찾을 수 없어요.", ephemeral=True)
-                return
-            dl = close_deadline(rec)
-            if dl is not None and clicked >= dl:
-                await interaction.response.send_message("⏰ 카운트가 끝난 뒤 눌렀어요. 마감 처리됩니다.", ephemeral=True)
-                return
-            if rec.get("status") == "active" and not a.can_bid(rec, interaction.user.id):
-                await interaction.response.send_message(
-                    "🔐 이 경매는 해당 보스탐 참석자만 입찰할 수 있어요.", ephemeral=True)
-                return
-            ok, text = apply_bid(rec, interaction.user.id, interaction.user.display_name, now=clicked)
-            if not ok:
-                await interaction.response.send_message(text, ephemeral=True)
-                return
-            a.store.save(mid, rec)
-            await interaction.response.edit_message(embed=build_embed(rec, a.currency), view=a.view_for(rec))
-            a._schedule_close(mid, rec)
+                reject = "경매 정보를 찾을 수 없어요."
+            else:
+                dl = close_deadline(rec)
+                if dl is not None and clicked >= dl:
+                    reject = "⏰ 카운트가 끝난 뒤 눌렀어요. 마감 처리됩니다."
+                elif rec.get("status") == "active" and not a.can_bid(rec, interaction.user.id):
+                    reject = "🔐 이 경매는 해당 보스탐 참석자만 입찰할 수 있어요."
+                else:
+                    ok, text = apply_bid(rec, interaction.user.id, interaction.user.display_name, now=clicked)
+                    if not ok:
+                        reject = text
+                    else:
+                        a.safe_save(mid, rec)
+                        a._schedule_close(mid, rec)
+                        price, count = int(rec["current_price"]), rec["bid_count"]
+        if reject:
+            await a.respond_ephemeral(interaction, reject)
+            return
         a.log.info(f"[경매 입찰] {rec.get('item')} | {interaction.user.display_name}({interaction.user.id}) "
-                   f"{int(rec['current_price']):,} | {rec['bid_count']}회 | msg {mid}")
+                   f"{price:,} | {count}회 | msg {mid}")
+        latest = a.store.get(mid) or rec   # 응답 순서가 뒤바뀌어도 항상 최신 상태로 그린다
+        await a.respond_edit(interaction, embed=build_embed(latest, a.currency), view=a.view_for(latest))
 
     @ui.button(label="경매종료", emoji="⏹️", style=discord.ButtonStyle.secondary, custom_id="boss_auc_stop")
     async def stop_btn(self, interaction: discord.Interaction, button: ui.Button):
@@ -1106,35 +1149,39 @@ class BoardView(ui.View):
         a = self.auction
         mid = interaction.message.id
         clicked = a.click_ts(interaction)   # 판정 기준 = 누른 순간
+        # 잠금 안에서는 판정·저장만 하고 Discord 응답은 밖에서 — 연타가 몰려도 뒤 클릭이 3초 응답 시한을 넘기지 않도록
+        reject, label, price, count = None, "", 0, 0
         async with a.lock:
             board = a.store.get(mid)
             lot = board_current(board) if board else None
-            if not lot or board.get("status") != "active":
-                await interaction.response.send_message("경매가 끝났어요.", ephemeral=True)
-                return
-            started = float(lot.get("started_ts") or 0)
-            if clicked < started:
-                await interaction.response.send_message(
-                    f"⏳ **{lot_label(lot)}** 경매는 <t:{int(started) + 1}:R> 시작해요.", ephemeral=True)
-                return
-            dl = close_deadline(lot)
-            if dl is not None and clicked >= dl:
-                await interaction.response.send_message("⏰ 카운트가 끝난 뒤 눌렀어요. 마감 처리됩니다.", ephemeral=True)
-                return
-            if not a.can_bid(board, interaction.user.id):
-                await interaction.response.send_message(
-                    "🔐 이 경매는 해당 보스탐 참석자만 입찰할 수 있어요.", ephemeral=True)
-                return
-            ok, text = apply_bid(lot, interaction.user.id, interaction.user.display_name, now=clicked)
-            if not ok:
-                await interaction.response.send_message(text, ephemeral=True)
-                return
-            a.store.save(mid, board)
-            await interaction.response.edit_message(embed=build_board_embed(board, a.currency, a.discord_now()),
-                                                    view=a.view_for(board))
-            a._schedule_board(mid, board)
-        a.log.info(f"[진행판 입찰] {lot_label(lot)} | {interaction.user.display_name}({interaction.user.id}) "
-                   f"{int(lot['current_price']):,} | {lot['bid_count']}회 | msg {mid}")
+            if not lot or board.get("status") != "active" or lot.get("status") != "active":
+                reject = "경매가 끝났어요."
+            else:
+                started = float(lot.get("started_ts") or 0)
+                dl = close_deadline(lot)
+                if clicked < started:
+                    reject = f"⏳ **{lot_label(lot)}** 경매는 <t:{int(started) + 1}:R> 시작해요."
+                elif dl is not None and clicked >= dl:
+                    reject = "⏰ 카운트가 끝난 뒤 눌렀어요. 마감 처리됩니다."
+                elif not a.can_bid(board, interaction.user.id):
+                    reject = "🔐 이 경매는 해당 보스탐 참석자만 입찰할 수 있어요."
+                else:
+                    ok, text = apply_bid(lot, interaction.user.id, interaction.user.display_name, now=clicked)
+                    if not ok:
+                        reject = text
+                    else:
+                        a.safe_save(mid, board)
+                        a._schedule_board(mid, board)
+                        label, price, count = lot_label(lot), int(lot["current_price"]), lot["bid_count"]
+        if reject:
+            await a.respond_ephemeral(interaction, reject)
+            return
+        a.log.info(f"[진행판 입찰] {label} | {interaction.user.display_name}({interaction.user.id}) "
+                   f"{price:,} | {count}회 | msg {mid}")
+        latest = a.store.get(mid)   # 응답 순서가 뒤바뀌어도 항상 최신 상태로 그린다
+        if latest:
+            await a.respond_edit(interaction, embed=build_board_embed(latest, a.currency, a.discord_now()),
+                                 view=a.view_for(latest))
 
     @ui.button(label="종료", emoji="⏹️", style=discord.ButtonStyle.secondary, custom_id="boss_board_stop")
     async def stop_btn(self, interaction: discord.Interaction, button: ui.Button):

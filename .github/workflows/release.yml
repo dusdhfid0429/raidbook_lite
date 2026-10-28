@@ -46,6 +46,7 @@ jobs:
           python Tests/test_boss_auction.py
           python Tests/test_channel_setup.py
           python Tests/test_boss_board.py
+          python Tests/test_bid_burst.py
 
       - name: Install Inno Setup
         shell: pwsh
