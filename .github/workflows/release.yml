@@ -11,6 +11,9 @@ on:
 permissions:
   contents: write
 
+env:
+  PYTHONUTF8: "1"   # 테스트/빌드 출력의 한글·기호가 cp1252 콘솔에서 깨지지 않도록
+
 jobs:
   build:
     runs-on: windows-latest
