@@ -92,7 +92,12 @@ def test_board_embed_builds():
     assert "⏸️ 다음 경매" in [f.name for f in e.fields]
     ba.board_start_next(board, 2000)
     e = ba.build_board_embed(board, "아데나", now=2001)
-    assert "⏱️ 마감" in [f.name for f in e.fields]
+    assert "## ⏱️ 마감 <t:" in e.description   # 카운트는 설명란 큰 글씨
+    lot = ba.board_current(board)
+    ba.apply_bid(lot, 1, "김", now=2001.5)
+    e = ba.build_board_embed(board, "아데나", now=2002)
+    assert "## 🥇 김 (" in e.description                                   # 최고 입찰자 + 누른 시각
+    assert f"<t:{int(2001.5 + ba.BID_SETTLE_SEC + lot['countdown_sec']) + 1}:R>" in e.description  # 2초 대기 후 카운트
 
 
 def _finish(board, winners):
@@ -172,8 +177,8 @@ def test_bid_history_and_deadline_order():
             assert lot["last_bid_at"] == 1003.0   # 늦게 처리된 앞 클릭이 마감을 앞당기지 않음
     text = ba.bid_history_text(lot)
     rows = text.split("\n")
-    assert len(rows) == 5 and rows[0].startswith("🥇 u3 — 150")   # 최신 5건, 최고 입찰자가 맨 위
-    assert "u1 — 100" not in text                                  # 6건 중 가장 오래된 건 빠짐
+    assert len(rows) == 5 and rows[0].startswith("🥇 u3 (") and rows[0].endswith("— 150")   # 최신 5건, 최고 입찰자가 맨 위
+    assert not rows[-1].endswith("— 100")                                 # 6건 중 가장 오래된 건 빠짐
     board = {"lots": [lot], "status": "active", "current": 0}
     e = ba.build_board_embed(board, now=1006.5)
     assert any(f.name.startswith("📜 최근 입찰") for f in e.fields)

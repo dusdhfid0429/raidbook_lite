@@ -86,11 +86,27 @@ def apply_bid(rec, uid, name, now=None):
     # 처리 순서가 클릭 순서와 달라도 마감 기준 시각은 뒤로만 간다
     rec["last_bid_at"] = max(float(now if now is not None else time.time()), float(rec.get("last_bid_at") or 0))
     rec.setdefault("bid_history", []).append({"uid": str(uid), "name": name, "price": price,
+                                              "ts": float(now if now is not None else time.time()),
                                               "at": datetime.now().isoformat(timespec="seconds")})
     return True, f"🙋 {price:,} 입찰했어요."
 
 
 BID_HISTORY_SHOW = 5
+BID_SETTLE_SEC = 2   # 입찰 후 이만큼 기다렸다가 마감 카운트 시작 (연타 몰림 정리 시간)
+
+
+def fmt_click_time(entry):
+    """입찰 버튼을 누른 순간 (Discord 기준, 밀리초까지) — 'HH:MM:SS.mmm'."""
+    ts = (entry or {}).get("ts")
+    if ts:
+        dt = datetime.fromtimestamp(float(ts))
+        return dt.strftime("%H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
+    return str((entry or {}).get("at") or "")[11:19]
+
+
+def last_bid_entry(rec):
+    hist = (rec or {}).get("bid_history") or []
+    return hist[-1] if hist else None
 
 
 def bid_history_text(rec, n=BID_HISTORY_SHOW):
@@ -100,18 +116,41 @@ def bid_history_text(rec, n=BID_HISTORY_SHOW):
         return ""
     lines = []
     for i, h in enumerate(reversed(hist[-n:])):
-        at = str(h.get("at") or "")[11:19]
         mark = "🥇" if i == 0 else "▫️"
-        lines.append(f"{mark} {h.get('name', '?')} — {int(h.get('price') or 0):,}" + (f" · {at}" if at else ""))
+        at = fmt_click_time(h)
+        lines.append(f"{mark} {h.get('name', '?')}" + (f" ({at})" if at else "") + f" — {int(h.get('price') or 0):,}")
     return "\n".join(lines)
 
 
 def close_deadline(rec):
-    """마감 예정 unix 시각 = (마지막 입찰 또는 시작 시각) + 카운트. 진행 전이면 None."""
-    base = rec.get("last_bid_at") or rec.get("started_ts")
-    if rec.get("status") != "active" or not base:
+    """마감 예정 unix 시각. 입찰 없으면 시작 + 카운트, 입찰 후엔 마지막 입찰 + 2초 대기 + 카운트. 진행 전이면 None."""
+    if rec.get("status") != "active":
         return None
-    return float(base) + int(rec["countdown_sec"])
+    if rec.get("last_bid_at"):
+        return float(rec["last_bid_at"]) + BID_SETTLE_SEC + int(rec["countdown_sec"])
+    if not rec.get("started_ts"):
+        return None
+    return float(rec["started_ts"]) + int(rec["countdown_sec"])
+
+
+def live_block(rec, unit="", now=None):
+    """진행 중 경매의 큰 글씨 부분: 최고 입찰자(누른 시각) · 현재가 · 마감 카운트."""
+    now = time.time() if now is None else now
+    started = float(rec.get("started_ts") or 0)
+    if started > now:
+        return f"## ⏳ 시작 <t:{int(started) + 1}:R>"
+    lines = []
+    if rec.get("bidder_id"):
+        at = fmt_click_time(last_bid_entry(rec))
+        lines.append(f"## 🥇 {rec.get('bidder_name')}" + (f" ({at})" if at else ""))
+        lines.append(f"## 💰 {int(rec.get('current_price') or 0):,}{unit}")
+    else:
+        lines.append("### 💰 아직 입찰 없음")
+    dl = close_deadline(rec)
+    if dl:
+        lines.append(f"## ⏱️ 마감 <t:{int(dl) + 1}:R>")
+        lines.append(f"-# 입찰 후 {BID_SETTLE_SEC}초 뒤부터 {int(rec['countdown_sec'])}초 카운트 · 새 입찰이 오면 다시 시작")
+    return "\n".join(lines)
 
 
 class AuctionStore:
@@ -173,22 +212,11 @@ def build_embed(rec, currency=""):
             embed = discord.Embed(title=f"⏸️ 경매 대기 — {item}",
                                   description="▶️ 경매시작을 누르면 입찰이 열립니다.", color=0x378add)
         else:
-            embed = discord.Embed(
-                title=f"🔨 경매 진행중 — {item}",
-                description=f"🙋 입찰을 누르면 금액이 호가만큼 올라갑니다.\n"
-                            f"**{rec.get('countdown_sec')}초** 동안 새 입찰이 없으면 마감!",
-                color=0xf0b232)
+            embed = discord.Embed(title=f"🔨 경매 진행중 — {item}", description=live_block(rec, unit),
+                                  color=0xf0b232)
         embed.add_field(name="시작가", value=f"{int(rec.get('start_price', 0)):,}{unit}", inline=True)
         embed.add_field(name="호가", value=f"{int(rec.get('increment', 0)):,}{unit}", inline=True)
         embed.add_field(name="카운트", value=f"{rec.get('countdown_sec')}초", inline=True)
-        if bidder:
-            embed.add_field(name="최종 입찰자", value=f"**{bidder}**", inline=True)
-            embed.add_field(name="현재가", value=f"**{price:,}{unit}**", inline=True)
-        elif status == "active":
-            embed.add_field(name="현재가", value="아직 입찰 없음", inline=False)
-        dl = close_deadline(rec)
-        if dl and status == "active":
-            embed.add_field(name="⏱️ 마감", value=f"<t:{int(dl) + 1}:R>", inline=False)
         hist = bid_history_text(rec)
         if hist and status == "active":
             embed.add_field(name=f"📜 최근 입찰 (총 {rec.get('bid_count', 0)}회)", value=hist, inline=False)
@@ -1165,18 +1193,7 @@ def build_board_embed(board, currency="", now=None):
         embed.add_field(name="시작가", value=f"{int(lot['start_price']):,}{unit}", inline=True)
         embed.add_field(name="호가", value=f"{int(lot['increment']):,}{unit}", inline=True)
         embed.add_field(name="카운트", value=f"{lot['countdown_sec']}초", inline=True)
-        if lot.get("bidder_id"):
-            embed.add_field(name="최고 입찰자", value=f"**{lot['bidder_name']}**", inline=True)
-            embed.add_field(name="현재가", value=f"**{int(lot['current_price']):,}{unit}**", inline=True)
-        else:
-            embed.add_field(name="현재가", value="아직 입찰 없음", inline=True)
-        started = float(lot.get("started_ts") or 0)
-        if started > now:
-            embed.add_field(name="⏳ 시작", value=f"<t:{int(started) + 1}:R>", inline=False)
-        else:
-            dl = close_deadline(lot)
-            if dl:
-                embed.add_field(name="⏱️ 마감", value=f"<t:{int(dl) + 1}:R>", inline=False)
+        embed.description = (desc + "\n\n" + live_block(lot, unit, now))[:4090]
         hist = bid_history_text(lot)
         if hist:
             embed.add_field(name=f"📜 최근 입찰 (총 {lot.get('bid_count', 0)}회)", value=hist, inline=False)
