@@ -159,7 +159,7 @@ def missing_required_configs() -> list:
     return missing
 
 
-# 초기 설정 마법사 필요 여부 (봇별 토큰/필수 채널 ID 중 하나라도 미설정 시)
+# 초기 설정 마법사 필요 여부 (봇 토큰 중 하나라도 미설정 시)
 _WIZARD_MODE = bool(missing_required_configs())
 
 
@@ -432,7 +432,7 @@ class WatchdogApp(tk.Tk):
                                 font=self._font_small, bg=_C["btn_blue"], fg="white",
                                 relief="flat", padx=10, pady=2, cursor="hand2")
             fix_btn.pack(side="right", padx=8, pady=3)
-            _Tooltip(fix_btn, "설정 마법사를 열어 누락된 토큰·채널 ID를 채웁니다.\n저장하면 봇이 자동 재시작되어 즉시 적용됩니다.")
+            _Tooltip(fix_btn, "설정 마법사를 열어 누락된 봇 토큰을 채웁니다.\n저장하면 봇이 자동 재시작되어 즉시 적용됩니다.")
 
         # ── 헤더 ──────────────────────────────────────────────────────────
         hdr = tk.Frame(self, bg=_C["bg"])
@@ -1792,22 +1792,7 @@ class WatchdogApp(tk.Tk):
                   "이 시간(초) 안에 최대 횟수 이상 재시작하면 중단합니다.")
         v_rapid_window = _int_entry(r3, RAPID_RESTART_WINDOW, 10, 3600)
 
-        # ── 섹션 2: 네트워크 체크 ─────────────────────────────────────────
-        _section("네트워크 체크")
-
-        r4 = _row(win, "네트워크 체크 활성화",
-                  "Discord 서버 TCP 연결 주기 체크 여부.")
-        v_net_enabled = _bool_check(r4, NETWORK_CHECK_ENABLED)
-
-        r5 = _row(win, "체크 주기 (초)",
-                  "Discord 서버에 TCP 연결을 시도하는 주기입니다.")
-        v_net_interval = _int_entry(r5, NETWORK_CHECK_INTERVAL, 10, 3600)
-
-        r6 = _row(win, "연결 타임아웃 (초)",
-                  "TCP 연결 시도당 최대 대기 시간.")
-        v_net_timeout = _int_entry(r6, NETWORK_CHECK_TIMEOUT, 1, 30)
-
-        # ── 섹션 3: Discord 봇 연결 ───────────────────────────────────────
+        # ── 섹션 2: Discord 봇 연결 ───────────────────────────────────────
         _section("Discord 봇 연결")
 
         # 안내 문구
@@ -1840,15 +1825,12 @@ class WatchdogApp(tk.Tk):
                        selectcolor=_C["bg"], activebackground=_C["panel"],
                        relief="flat", cursor="hand2").pack(side="left", padx=4)
 
-        r8 = _row(win, "관리 채널 ID",
-                  "Watchdog 명령어를 수신할 Discord 채널 ID.\n채널 우클릭 → ID 복사로 확인할 수 있습니다.")
-        v_channel = _str_entry(r8, str(ADMIN_CHANNEL_ID) if ADMIN_CHANNEL_ID else "")
 
-        # ── 섹션 4: 봇 필수 설정 (Watchdog/Boss) ───────────────────────────
+        # ── 섹션 3: 봇 필수 설정 (Watchdog/Boss) ───────────────────────────
         _section("봇 설정 (Watchdog / Boss)")
 
-        r9 = _row(win, "토큰 · 채널 ID 일괄 설정",
-                  "설정 마법사로 각 봇의 토큰과 필수 채널 ID를 확인·수정합니다.\n"
+        r9 = _row(win, "봇 토큰 설정",
+                  "설정 마법사로 각 봇의 토큰을 확인·수정합니다. 채널은 자동 생성됩니다.\n"
                   "저장하면 봇이 자동 재시작되어 즉시 적용됩니다.")
 
         def _open_wizard_from_settings():
@@ -1860,7 +1842,7 @@ class WatchdogApp(tk.Tk):
                             relief="flat", padx=10, pady=3, cursor="hand2")
         wiz_btn.pack(side="left")
 
-        # ── 섹션 5: 백업 / 이동 ───────────────────────────────────────────
+        # ── 섹션 4: 백업 / 이동 ───────────────────────────────────────────
         _section("백업 / 이동")
 
         r10 = _row(win, "설정·데이터 백업",
@@ -1894,8 +1876,7 @@ class WatchdogApp(tk.Tk):
         # ── 적용 버튼 ─────────────────────────────────────────────────────
         def _apply():
             global RESTART_DELAY, MAX_RAPID_RESTARTS, RAPID_RESTART_WINDOW
-            global NETWORK_CHECK_ENABLED, NETWORK_CHECK_INTERVAL, NETWORK_CHECK_TIMEOUT
-            global WATCHDOG_TOKEN, ADMIN_CHANNEL_ID
+            global WATCHDOG_TOKEN
 
             errors = []
 
@@ -1912,19 +1893,8 @@ class WatchdogApp(tk.Tk):
             delay        = _parse_int(v_delay,       "재시작 대기",        1,  300)
             max_r        = _parse_int(v_max_restart,  "빠른 재시작 횟수",   1,   20)
             rapid_w      = _parse_int(v_rapid_window, "빠른 재시작 윈도우", 10, 3600)
-            net_interval = _parse_int(v_net_interval, "체크 주기",         10, 3600)
-            net_timeout  = _parse_int(v_net_timeout,  "연결 타임아웃",      1,   30)
 
             new_token   = v_token.get().strip()
-            new_channel = v_channel.get().strip()
-            if new_channel:
-                try:
-                    new_channel_id = int(new_channel)
-                except ValueError:
-                    errors.append("관리 채널 ID: 숫자만 입력하세요.")
-                    new_channel_id = None
-            else:
-                new_channel_id = 0
 
             if errors:
                 result_var.set("❌ " + " / ".join(errors))
@@ -1937,22 +1907,14 @@ class WatchdogApp(tk.Tk):
             RESTART_DELAY          = delay
             MAX_RAPID_RESTARTS     = max_r
             RAPID_RESTART_WINDOW   = rapid_w
-            NETWORK_CHECK_ENABLED  = v_net_enabled.get()
-            NETWORK_CHECK_INTERVAL = net_interval
-            NETWORK_CHECK_TIMEOUT  = net_timeout
             _core.RESTART_DELAY          = RESTART_DELAY
             _core.MAX_RAPID_RESTARTS     = MAX_RAPID_RESTARTS
             _core.RAPID_RESTART_WINDOW   = RAPID_RESTART_WINDOW
-            _core.NETWORK_CHECK_ENABLED  = NETWORK_CHECK_ENABLED
-            _core.NETWORK_CHECK_INTERVAL = NETWORK_CHECK_INTERVAL
-            _core.NETWORK_CHECK_TIMEOUT  = NETWORK_CHECK_TIMEOUT
 
             # Discord 봇 재연결 필요 여부
-            discord_changed = (new_token != WATCHDOG_TOKEN) or (new_channel_id != ADMIN_CHANNEL_ID)
+            discord_changed = new_token != WATCHDOG_TOKEN
             WATCHDOG_TOKEN   = new_token
-            ADMIN_CHANNEL_ID = new_channel_id if new_channel_id is not None else ADMIN_CHANNEL_ID
             _core.WATCHDOG_TOKEN      = WATCHDOG_TOKEN
-            _core.ADMIN_CHANNEL_ID    = ADMIN_CHANNEL_ID
 
             # config 파일에 저장
             try:
@@ -1962,11 +1924,6 @@ class WatchdogApp(tk.Tk):
                 cfg["max_rapid_restarts"]           = MAX_RAPID_RESTARTS
                 cfg["rapid_restart_window_seconds"] = RAPID_RESTART_WINDOW
                 cfg["token"]                        = WATCHDOG_TOKEN
-                cfg["admin_channel_id"]             = ADMIN_CHANNEL_ID
-                nc = cfg.setdefault("network_check", {})
-                nc["enabled"]          = NETWORK_CHECK_ENABLED
-                nc["interval_seconds"] = NETWORK_CHECK_INTERVAL
-                nc["timeout_seconds"]  = NETWORK_CHECK_TIMEOUT
                 with open(CONFIG_PATH, "w", encoding="utf-8") as f:
                     json.dump(cfg, f, ensure_ascii=False, indent=2)
                 log.info("[설정] 변경 사항 적용 및 파일 저장 완료")
@@ -2158,7 +2115,7 @@ class WatchdogApp(tk.Tk):
 
     # ── 설정 마법사 열기 (실행 중 수정) ─────────────────────────────────────
     def _open_config_wizard(self):
-        """실행 중 봇 토큰·채널 ID를 수정하는 마법사. 저장 시 봇 자동 재시작."""
+        """실행 중 봇 토큰을 수정하는 마법사. 저장 시 봇 자동 재시작."""
 
         def _on_saved():
             # 필수값이 모두 채워졌으면 경고 배너 제거
@@ -2230,9 +2187,9 @@ class WatchdogApp(tk.Tk):
         tk.Label(hdr, text="\U0001f6e1  RaidBook Watchdog  —  " + ("봇 설정 수정" if edit_mode else "초기 설정 마법사"),
                  font=self._font_title, bg="#1a2744", fg=_C["blue"],
                  padx=20).pack(anchor="w")
-        tk.Label(hdr, text=("각 봇의 토큰과 채널 ID를 수정합니다. 저장하면 봇이 자동 재시작됩니다."
+        tk.Label(hdr, text=("각 봇의 토큰을 수정합니다. 채널은 자동 생성됩니다. 저장하면 봇이 자동 재시작됩니다."
                             if edit_mode else
-                            "시스템 첫 실행 시 각 봇의 토큰과 채널 ID를 설정합니다."),
+                            "시스템 첫 실행 시 각 봇의 토큰을 설정합니다. 채널은 자동 생성됩니다."),
                  font=self._font_small, bg="#1a2744", fg=_C["text_dim"],
                  padx=20).pack(anchor="w")
         tk.Label(hdr, text="※ 토큰은 Discord 개발자 포털에서 발급하며, 각 봇의 Bot 탭에서 "
@@ -2328,11 +2285,7 @@ class WatchdogApp(tk.Tk):
 
         v = {
             "wdog_token":     _sv(wdog_c.get("token", "")),
-            "wdog_channel":   _sv(wdog_c.get("admin_channel_id", "")),
             "boss_token":     _sv(boss_c.get("token", "")),
-            "boss_alert":     _sv(boss_c.get("alert_channel_id", "")),
-            "boss_cmd":       _sv(boss_c.get("command_channel_id", "")),
-            "boss_loot":      _sv(boss_c.get("loot_channel_id", "")),
         }
 
         # ── 위젯 헬퍼        }
@@ -2384,25 +2337,19 @@ class WatchdogApp(tk.Tk):
         # Step 0 — Watchdog
         s0 = _mk()
         _step_header(s0, "\U0001f6e1", "Watchdog Bot 설정",
-                     "Watchdog 봇 자체의 토큰과 관리 채널 ID를 입력합니다.\n"
-                     "이 채널에서 !watchdog 명령어를 수신하고 시작·크래시 알림을 전송합니다.")
+                     "Watchdog 봇의 토큰만 입력하면 됩니다.\n"
+                     "관리 채널(raidbook-관리)은 봇이 처음 켜질 때 자동으로 만듭니다.")
         _field(s0, "봇 토큰",       v["wdog_token"],   hide=True,
                tip="Discord 개발자 포털 → Bot 탭 → Token 복사")
-        _field(s0, "관리자 채널 ID", v["wdog_channel"],
-               tip="채널 우클릭 → ID 복사 (개발자 모드 필요)\n비워 두면 봇이 'raidbook-관리' 채널을 자동으로 만듭니다.")
 
         # Step 1 — Boss Bot
         s1 = _mk()
         _step_header(s1, "⚔", "Boss Bot 설정",
-                     "보스 스케줄 및 전리품을 관리하는 봇의 채널 ID를 입력합니다.\n비워 둔 채널은 봇이 시작할 때 RaidBook 카테고리에 자동으로 만듭니다.")
+                     "Boss Bot의 토큰만 입력하면 됩니다.\n"
+                     "보탐-알림·보탐-명령·전리품·경매장 채널은 봇이 시작할 때 RaidBook 카테고리에 자동으로 만듭니다.\n"
+                     "만든 뒤 이름을 바꾸거나 옮겨도 그대로 동작합니다 (채널 ID 기준).")
         _field(s1, "봇 토큰",       v["boss_token"],  hide=True,
                tip="Boss Bot Discord 봇 토큰")
-        _field(s1, "알림 채널 ID",   v["boss_alert"],
-               tip="보스 출현 알림이 전송되는 채널 ID")
-        _field(s1, "명령어 채널 ID", v["boss_cmd"],
-               tip="!boss 명령어를 수신하는 채널 ID")
-        _field(s1, "전리품 채널 ID", v["boss_loot"],
-               tip="전리품 기록이 게시되는 채널 ID")
 
         # ── 스텝 전환 로직 ────────────────────────────────────────────────────
         cur = [0]
@@ -2458,16 +2405,12 @@ class WatchdogApp(tk.Tk):
 
             if idx == 0:
                 _tk("wdog_token",     "Watchdog 토큰")
-                _ch("wdog_channel",   "관리자 채널 ID", req=False)
             elif idx == 1:
                 _tk("boss_token",     "Boss Bot 토큰")
-                _ch("boss_alert",     "알림 채널 ID", req=False)
-                _ch("boss_cmd",       "명령어 채널 ID", req=False)
-                _ch("boss_loot",      "전리품 채널 ID", req=False)
             return errors
 
         def _save_all():
-            global WATCHDOG_TOKEN, ADMIN_CHANNEL_ID
+            global WATCHDOG_TOKEN
 
             def _str(key):
                 return v[key].get().strip()
@@ -2484,7 +2427,6 @@ class WatchdogApp(tk.Tk):
                 except Exception:
                     wdog = {}
                 wdog["token"]            = _str("wdog_token")
-                wdog["admin_channel_id"] = _int("wdog_channel")
                 with open(CONFIG_PATH, "w", encoding="utf-8") as f:
                     json.dump(wdog, f, ensure_ascii=False, indent=4)
 
@@ -2495,17 +2437,12 @@ class WatchdogApp(tk.Tk):
                 except Exception:
                     boss = {}
                 boss["token"]              = _str("boss_token")
-                boss["alert_channel_id"]   = _int("boss_alert")
-                boss["command_channel_id"] = _int("boss_cmd")
-                boss["loot_channel_id"]    = _int("boss_loot")
                 with open(_BOSS_PATH, "w", encoding="utf-8") as f:
                     json.dump(boss, f, ensure_ascii=False, indent=4)
 
                 # 전역 변수 즉시 반영 (run_bot/_wdog_bot 등은 공유 코어 모듈에 있으므로 그쪽도 갱신)
                 WATCHDOG_TOKEN   = _str("wdog_token")
-                ADMIN_CHANNEL_ID = _int("wdog_channel")
                 _core.WATCHDOG_TOKEN      = WATCHDOG_TOKEN
-                _core.ADMIN_CHANNEL_ID    = ADMIN_CHANNEL_ID
 
                 log.info("[마법사] 모든 설정 파일 저장 완료")
                 return True
