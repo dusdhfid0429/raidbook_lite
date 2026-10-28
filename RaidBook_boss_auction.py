@@ -83,10 +83,27 @@ def apply_bid(rec, uid, name, now=None):
     rec["bidder_id"] = str(uid)
     rec["bidder_name"] = name
     rec["bid_count"] = int(rec.get("bid_count", 0)) + 1
-    rec["last_bid_at"] = float(now if now is not None else time.time())
+    # 처리 순서가 클릭 순서와 달라도 마감 기준 시각은 뒤로만 간다
+    rec["last_bid_at"] = max(float(now if now is not None else time.time()), float(rec.get("last_bid_at") or 0))
     rec.setdefault("bid_history", []).append({"uid": str(uid), "name": name, "price": price,
                                               "at": datetime.now().isoformat(timespec="seconds")})
     return True, f"🙋 {price:,} 입찰했어요."
+
+
+BID_HISTORY_SHOW = 5
+
+
+def bid_history_text(rec, n=BID_HISTORY_SHOW):
+    """최근 입찰 n건 (최신이 위) — 최고 입찰자가 바뀌는 흐름을 보여 준다."""
+    hist = (rec or {}).get("bid_history") or []
+    if not hist:
+        return ""
+    lines = []
+    for i, h in enumerate(reversed(hist[-n:])):
+        at = str(h.get("at") or "")[11:19]
+        mark = "🥇" if i == 0 else "▫️"
+        lines.append(f"{mark} {h.get('name', '?')} — {int(h.get('price') or 0):,}" + (f" · {at}" if at else ""))
+    return "\n".join(lines)
 
 
 def close_deadline(rec):
@@ -172,6 +189,9 @@ def build_embed(rec, currency=""):
         dl = close_deadline(rec)
         if dl and status == "active":
             embed.add_field(name="⏱️ 마감", value=f"<t:{int(dl) + 1}:R>", inline=False)
+        hist = bid_history_text(rec)
+        if hist and status == "active":
+            embed.add_field(name=f"📜 최근 입찰 (총 {rec.get('bid_count', 0)}회)", value=hist, inline=False)
     if rec.get("source_message_id") and status != "closed":
         embed.add_field(name="🔐 입찰 자격", value="해당 보스탐 참석자만 입찰할 수 있어요.", inline=False)
     embed.set_footer(text=f"입찰 {rec.get('bid_count', 0)}회 · 등록자 {rec.get('creator_name', '-')}")
@@ -365,6 +385,31 @@ class BossAuction:
         self.log.info(f"[경매 마감] {rec.get('item')} | 낙찰 {rec.get('bidder_name') or '유찰'} "
                       f"{int(rec.get('current_price') or 0):,} | 입찰 {rec.get('bid_count', 0)}회 | msg {mid}")
         return rec
+
+    async def watch_overdue(self, interval=3.0, slack=3.0):
+        """마감 시각이 지났는데 마감 처리가 안 된 경매를 찾아 마감 (타이머가 취소·유실돼도 카운트가 멈춘 채 남지 않게)."""
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                now = self.discord_now()
+                for mid, rec in list(self.store.load().items()):
+                    board = rec.get("type") == "board"
+                    target = board_current(rec) if board else rec
+                    if not target or (board and rec.get("status") != "active"):
+                        continue
+                    dl = close_deadline(target)
+                    if dl is None or now < dl + CLOSE_GRACE_SEC + slack:
+                        continue
+                    task = self._close_tasks.get(str(mid))
+                    if task and not task.done():
+                        continue
+                    self.log.info(f"[경매 마감 점검] 마감 지난 경매 처리 | msg {mid}")
+                    if board:
+                        await self.advance_board(mid, expected=(rec.get("current"), target.get("bid_count")))
+                    else:
+                        await self.close(mid, expected_bids=rec.get("bid_count"))
+            except Exception as e:
+                self.log.info(f"[경매 마감 점검 실패] {type(e).__name__}: {e}")
 
     async def restore(self):
         """재시작 후 진행 중 경매의 마감 타이머 재등록 (마감 지난 건 즉시 낙찰)."""
@@ -1132,6 +1177,9 @@ def build_board_embed(board, currency="", now=None):
             dl = close_deadline(lot)
             if dl:
                 embed.add_field(name="⏱️ 마감", value=f"<t:{int(dl) + 1}:R>", inline=False)
+        hist = bid_history_text(lot)
+        if hist:
+            embed.add_field(name=f"📜 최근 입찰 (총 {lot.get('bid_count', 0)}회)", value=hist, inline=False)
         if board.get("source_message_id"):
             embed.add_field(name="🔐 입찰 자격", value="해당 보스탐 참석자만 입찰할 수 있어요.", inline=False)
     done = sum(1 for x in lots if x.get("status") in ("closed", "cancelled"))

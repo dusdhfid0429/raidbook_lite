@@ -162,6 +162,23 @@ def test_pending_entries_and_embed():
     assert "목걸이" not in e.description   # 기간 밖
 
 
+def test_bid_history_and_deadline_order():
+    lot = ba.make_lot("집행검", "", 100, 10, 30)
+    lot["status"] = "active"
+    lot["started_ts"] = 1000.0
+    for i, (uid, ts) in enumerate([(1, 1001.0), (2, 1003.0), (3, 1002.0), (1, 1004.0), (2, 1005.0), (3, 1006.0)]):
+        assert ba.apply_bid(lot, uid, f"u{uid}", now=ts)[0]
+        if i == 2:
+            assert lot["last_bid_at"] == 1003.0   # 늦게 처리된 앞 클릭이 마감을 앞당기지 않음
+    text = ba.bid_history_text(lot)
+    rows = text.split("\n")
+    assert len(rows) == 5 and rows[0].startswith("🥇 u3 — 150")   # 최신 5건, 최고 입찰자가 맨 위
+    assert "u1 — 100" not in text                                  # 6건 중 가장 오래된 건 빠짐
+    board = {"lots": [lot], "status": "active", "current": 0}
+    e = ba.build_board_embed(board, now=1006.5)
+    assert any(f.name.startswith("📜 최근 입찰") for f in e.fields)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

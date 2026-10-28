@@ -5412,6 +5412,9 @@ async def _ensure_boss_channels():
     return notes
 
 
+_auction_watch_task = None
+
+
 async def initialize_on_ready():
     global daily_refresh_task
     channel_notes = await _ensure_boss_channels() if AUTO_CREATE_CHANNELS else []
@@ -5422,6 +5425,9 @@ async def initialize_on_ready():
     bot.add_view(BoardView(boss_auction))  # 경매 진행판 버튼 재시작 복구
     bot.add_view(PendingListView())  # 📌 경매 대기 목록 버튼 재시작 복구
     await boss_auction.restore()
+    global _auction_watch_task
+    if _auction_watch_task is None or _auction_watch_task.done():
+        _auction_watch_task = asyncio.ensure_future(boss_auction.watch_overdue())
     global _close_sweep_task
     if _close_sweep_task is None or _close_sweep_task.done():
         _close_sweep_task = asyncio.ensure_future(_close_sweep_loop())
