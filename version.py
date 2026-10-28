@@ -7,7 +7,7 @@ from datetime import datetime
 # 버전 정보
 VERSION_MAJOR = 1
 VERSION_MINOR = 0
-VERSION_PATCH = 20
+VERSION_PATCH = 21
 VERSION_BUILD = 1
 
 # 버전 문자열
@@ -16,7 +16,7 @@ VERSION_FULL = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}.{VERSION_BUILD}
 
 # 릴리즈 정보
 RELEASE_DATE = "2026-10-28"
-RELEASE_NAME = "Lite - 음악 봇 유튜브 403 수정 (yt-dlp 파이프 재생)"
+RELEASE_NAME = "Lite - 음악 봇 음질 개선"
 RELEASE_CHANNEL = "stable"  # stable, beta, alpha
 
 # 제품 정보
