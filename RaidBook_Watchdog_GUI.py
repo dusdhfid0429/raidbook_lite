@@ -136,9 +136,10 @@ log.addHandler(_queue_handler)
 # 하나라도 비어 있으면 초기 설정 마법사를 먼저 띄운다.
 _REQUIRED_CONFIG_FIELDS = [
     ("watchdog_config.json",   "Watchdog",
-     [("token", "토큰"), ("admin_channel_id", "관리자 채널 ID")]),
+     [("token", "토큰")]),
     ("boss_config.json",       "Boss Bot",
-     [("token", "토큰"), ("alert_channel_id", "알림 채널 ID")]),
+     [("token", "토큰")]),
+    # 채널 ID는 비워 두면 봇이 시작할 때 자동 생성 (RaidBook_channel_setup)
 
 ]
 
@@ -2388,12 +2389,12 @@ class WatchdogApp(tk.Tk):
         _field(s0, "봇 토큰",       v["wdog_token"],   hide=True,
                tip="Discord 개발자 포털 → Bot 탭 → Token 복사")
         _field(s0, "관리자 채널 ID", v["wdog_channel"],
-               tip="채널 우클릭 → ID 복사 (개발자 모드 필요)\n숫자만 입력하세요.")
+               tip="채널 우클릭 → ID 복사 (개발자 모드 필요)\n비워 두면 봇이 'raidbook-관리' 채널을 자동으로 만듭니다.")
 
         # Step 1 — Boss Bot
         s1 = _mk()
         _step_header(s1, "⚔", "Boss Bot 설정",
-                     "보스 스케줄 및 전리품을 관리하는 봇의 채널 ID를 입력합니다.")
+                     "보스 스케줄 및 전리품을 관리하는 봇의 채널 ID를 입력합니다.\n비워 둔 채널은 봇이 시작할 때 RaidBook 카테고리에 자동으로 만듭니다.")
         _field(s1, "봇 토큰",       v["boss_token"],  hide=True,
                tip="Boss Bot Discord 봇 토큰")
         _field(s1, "알림 채널 ID",   v["boss_alert"],
@@ -2457,12 +2458,12 @@ class WatchdogApp(tk.Tk):
 
             if idx == 0:
                 _tk("wdog_token",     "Watchdog 토큰")
-                _ch("wdog_channel",   "관리자 채널 ID")
+                _ch("wdog_channel",   "관리자 채널 ID", req=False)
             elif idx == 1:
                 _tk("boss_token",     "Boss Bot 토큰")
-                _ch("boss_alert",     "알림 채널 ID")
-                _ch("boss_cmd",       "명령어 채널 ID")
-                _ch("boss_loot",      "전리품 채널 ID")
+                _ch("boss_alert",     "알림 채널 ID", req=False)
+                _ch("boss_cmd",       "명령어 채널 ID", req=False)
+                _ch("boss_loot",      "전리품 채널 ID", req=False)
             return errors
 
         def _save_all():

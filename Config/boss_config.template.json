@@ -1,5 +1,8 @@
 {
   "token": "",
+  "guild_id": null,
+  "auto_create_channels": true,
+  "_auto_create_channels_comment": "채널 ID가 비었거나 채널이 삭제됐으면 시작 시 'RaidBook' 카테고리에 자동 생성 (봇에 '채널 관리' 권한 필요). guild_id 비우면 설정된 채널/유일한 서버로 자동 판단.",
   "ipc_port": 7701,
   "base_dir": "",
   "alert_channel_id": null,

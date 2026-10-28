@@ -39,7 +39,9 @@ jobs:
           $global:LASTEXITCODE = 0
 
       - name: Tests
-        run: python Tests/test_boss_auction.py
+        run: |
+          python Tests/test_boss_auction.py
+          python Tests/test_channel_setup.py
 
       - name: Install Inno Setup
         shell: pwsh

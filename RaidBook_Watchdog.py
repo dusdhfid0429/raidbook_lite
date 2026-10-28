@@ -930,10 +930,40 @@ async def _update_check_loop():
         await asyncio.sleep(max(1, UPDATE_CHECK_INTERVAL_HOURS) * 3600)
 
 
+async def _ensure_admin_channel():
+    """관리 채널이 비었거나 삭제됐으면 'raidbook-관리'(비공개)를 만들어 config에 저장."""
+    global ADMIN_CHANNEL_ID
+    if not config.get("auto_create_channels", True):
+        return
+    try:
+        from RaidBook_channel_setup import ChannelSpec, ensure_channels
+        if not config.get("guild_id"):
+            # 보스봇 config의 채널로 같은 서버를 찾는다
+            try:
+                with open(get_config_path("boss_config.json"), "r", encoding="utf-8") as f:
+                    _boss_cfg = json.load(f)
+                for key in ("alert_channel_id", "command_channel_id", "loot_channel_id"):
+                    ch = _wdog_bot.get_channel(int(_boss_cfg.get(key) or 0))
+                    if ch is not None:
+                        config["guild_id"] = ch.guild.id
+                        break
+            except Exception:
+                pass
+        created, problems = await ensure_channels(
+            _wdog_bot, CONFIG_PATH, config,
+            [ChannelSpec("admin_channel_id", "raidbook-관리", private=True)], log)
+        for p in problems:
+            log.info(f"[Watchdog Discord] 관리 채널 자동 생성: {p}")
+        ADMIN_CHANNEL_ID = int(config.get("admin_channel_id") or 0)
+    except Exception as e:
+        log.info(f"[Watchdog Discord] 관리 채널 자동 생성 오류: {e}")
+
+
 @_wdog_bot.event
 async def on_ready():
     global _wdog_ready_announced, _update_check_task
     log.info(f"[Watchdog Discord] {_wdog_bot.user} 연결됨")
+    await _ensure_admin_channel()
     await _sync_watchdog_slash_commands()
     await _start_panel_services()
     if UPDATE_CHECK_ENABLED and ADMIN_CHANNEL_ID and (_update_check_task is None or _update_check_task.done()):
@@ -1510,7 +1540,7 @@ def restart_discord_bot():
     _wdog_ready_announced = False
     _wdog_slash_synced = False
     time.sleep(2)
-    if WATCHDOG_TOKEN and ADMIN_CHANNEL_ID:
+    if WATCHDOG_TOKEN and (ADMIN_CHANNEL_ID or config.get("auto_create_channels", True)):
         t = threading.Thread(target=_run_discord_watchdog, daemon=True)
         t.start()
         log.info("[Watchdog Discord] Discord 봇 재시작됨")
@@ -1547,10 +1577,11 @@ def sync_base_dir():
 
 def start_discord_bot_thread():
     """Watchdog Discord 봇을 백그라운드 스레드로 시작 (token/channel 설정된 경우만)."""
-    if WATCHDOG_TOKEN and ADMIN_CHANNEL_ID:
+    # 관리 채널이 비어 있어도 시작 — on_ready에서 자동 생성 (auto_create_channels)
+    if WATCHDOG_TOKEN and (ADMIN_CHANNEL_ID or config.get("auto_create_channels", True)):
         t = threading.Thread(target=_run_discord_watchdog, daemon=True)
         t.start()
-        log.info(f"[Watchdog Discord] 봇 시작 중... (관리 채널: {ADMIN_CHANNEL_ID})")
+        log.info(f"[Watchdog Discord] 봇 시작 중... (관리 채널: {ADMIN_CHANNEL_ID or '자동 생성'})")
         return t
     log.info("[Watchdog Discord] token 또는 admin_channel_id 미설정 — Discord 봇 비활성")
     return None

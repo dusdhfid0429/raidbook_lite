@@ -25,12 +25,12 @@ def build(script, name, hidden):
 build('RaidBook_Watchdog_GUI.py', 'RaidBook', [
     'discord', 'discord.ext.commands', 'pystray', 'PIL', 'PIL.Image',
     'tkinter', 'tkinter.ttk', 'tkinter.scrolledtext', 'tkinter.messagebox',
-    'RaidBook_Watchdog', 'RaidBook_updater', 'RaidBook_common', 'version', 'config_helper',
+    'RaidBook_Watchdog', 'RaidBook_updater', 'RaidBook_channel_setup', 'RaidBook_common', 'version', 'config_helper',
 ])
 build('RaidBook_boss_Bot.py', 'RaidBook_Boss_Bot', [
     'discord', 'discord.ext.commands', 'openpyxl', 'PIL', 'PIL.Image',
     'RaidBook_common', 'RaidBook_storage', 'RaidBook_store_core', 'RaidBook_store_attend',
     'RaidBook_users', 'RaidBook_ipc', 'RaidBook_boss_data', 'RaidBook_images', 'RaidBook_loot',
     'RaidBook_attendance', 'RaidBook_members', 'RaidBook_party', 'RaidBook_schedule',
-    'RaidBook_boss_auction', 'config_helper',
+    'RaidBook_boss_auction', 'RaidBook_channel_setup', 'config_helper',
 ])

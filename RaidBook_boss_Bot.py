@@ -237,6 +237,8 @@ ATTEND_BUTTON_IDS = ("boss_join", "boss_cancel", "boss_voicecheck")
 LOOT_AUCTION_BUTTON = bool(config.get("loot_auction_button", False))
 AUCTION_CHANNEL_ID = int(config.get("auction_channel_id") or 0)
 AUCTION_CURRENCY = str(config.get("auction_currency", "아데나") or "")
+# 설정된 채널이 없거나 삭제됐으면 시작 시 "RaidBook" 카테고리에 자동 생성 (채널 관리 권한 필요)
+AUTO_CREATE_CHANNELS = bool(config.get("auto_create_channels", True))
 # 참석자가 아니어도 획득 아이템 버튼을 사용할 수 있는 강제 허용 UID 목록 (관리자/대리 입력 등)
 LOOT_FORCE_USER_IDS = set(str(u) for u in (config.get("loot_force_user_ids") or []))
 
@@ -4722,8 +4724,43 @@ async def _sync_slash_commands():
             log.warning(f"[슬래시 동기화 실패] {guild.name}({guild.id}): {type(e).__name__}: {e}")
 
 
+async def _ensure_boss_channels():
+    """없는 채널 자동 생성 후 채널 전역값을 갱신. 결과 안내 문자열 목록 반환."""
+    global ALERT_CHANNEL_ID, COMMAND_CHANNEL_ID, LOOT_CHANNEL_ID, AUCTION_CHANNEL_ID, VOICE_CHANNEL_IDS
+    from RaidBook_channel_setup import ChannelSpec, ensure_channels, resolve_guild
+    keys = ["alert_channel_id", "command_channel_id", "loot_channel_id", "auction_channel_id", "voice_channel_ids"]
+    guild = resolve_guild(bot, config, keys)
+    specs = [
+        ChannelSpec("alert_channel_id", "보탐-알림"),
+        ChannelSpec("command_channel_id", "보탐-명령"),
+        ChannelSpec("loot_channel_id", "전리품"),
+    ]
+    if LOOT_AUCTION_BUTTON:
+        specs.append(ChannelSpec("auction_channel_id", "경매장"))
+    # 음성채널 목록이 비어 있으면 '서버 전체 음성채널' 모드 — 음성채널이 하나도 없을 때만 만든다
+    if config.get("voice_channel_ids") or (guild is not None and not guild.voice_channels):
+        specs.append(ChannelSpec("voice_channel_ids", "보탐-음성", voice=True, is_list=True))
+    try:
+        created, problems = await ensure_channels(bot, CONFIG_PATH, config, specs, log, guild=guild)
+    except Exception as e:
+        log.warning(f"[채널 자동 생성] 오류: {type(e).__name__}: {e}")
+        return [f"⚠️ 채널 자동 생성 오류: {e}"]
+    ALERT_CHANNEL_ID = config.get("alert_channel_id")
+    COMMAND_CHANNEL_ID = config.get("command_channel_id") or ALERT_CHANNEL_ID
+    LOOT_CHANNEL_ID = config.get("loot_channel_id") or COMMAND_CHANNEL_ID
+    AUCTION_CHANNEL_ID = int(config.get("auction_channel_id") or 0)
+    VOICE_CHANNEL_IDS = [int(c) for c in (config.get("voice_channel_ids") or []) if c]
+    boss_auction.channel_id = AUCTION_CHANNEL_ID
+    notes = [f"🆕 <#{ids[0]}> 채널을 만들었어요 (`{key}`)" for key, ids in created.items()]
+    for p in problems:
+        log.warning(f"[채널 자동 생성] {p}")
+        notes.append(f"⚠️ {p}")
+    return notes
+
+
 async def initialize_on_ready():
     global daily_refresh_task
+    channel_notes = await _ensure_boss_channels() if AUTO_CREATE_CHANNELS else []
     _auto_migrate_user_mapping()
     bot.add_view(AttendView())
     bot.add_view(LootAuctionView())  # 전리품 공지 경매시작 버튼 재시작 복구
@@ -4733,7 +4770,7 @@ async def initialize_on_ready():
     now = datetime.now()
     channel = bot.get_channel(COMMAND_CHANNEL_ID)
     if channel:
-        await channel.send(f"🟢 **보스 알림 봇이 시작되었습니다!** `{now.strftime('%Y-%m-%d %H:%M')}`")
+        await channel.send("\n".join([f"🟢 **보스 알림 봇이 시작되었습니다!** `{now.strftime('%Y-%m-%d %H:%M')}`"] + channel_notes))
     log.info(f"{bot.user} 준비 완료!")
 
     # 활성 메시지 auto_disable 복구
