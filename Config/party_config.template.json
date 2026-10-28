@@ -1,0 +1,6 @@
+{
+  "max_party_size": 8,
+  "min_single_party": 6,
+  "boss_confirm_minutes_before": 10,
+  "combat_no_spawn_confirm_seconds": 240
+}

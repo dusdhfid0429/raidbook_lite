@@ -1,0 +1,53 @@
+{
+  "token": "",
+  "ipc_port": 7701,
+  "base_dir": "",
+  "alert_channel_id": null,
+  "command_channel_id": null,
+  "loot_channel_id": null,
+  "loot_force_user_ids": [],
+  "daily_refresh_hour": 0,
+  "daily_refresh_minute": 0,
+  "close_minutes": 0,
+  "admin_role_ids": [],
+  "_admin_role_ids_comment": "버튼/명령 관리자 역할 ID 목록. 서버 소유자·서버 관리 권한 보유자는 항상 허용.",
+  "voice_channel_ids": [],
+  "_voice_channel_ids_comment": "정각 자동 인원체크 대상 음성채널 ID 목록. 비우면 서버의 모든 음성채널(AFK 제외). /인원체크는 명령을 입력한 음성채널 기준.",
+  "voice_check_at_spawn": true,
+  "hide_attend_buttons": true,
+  "loot_auction_button": true,
+  "auction_channel_id": null,
+  "auction_currency": "아데나",
+  "_voice_check_at_spawn_comment": "보스 출현 정각에 음성채널 접속자를 자동 참석 처리.",
+  "alert_minutes": 20,
+  "image_display": "banner",
+  "_image_display_comment": "boss image 표시 방식: banner=embed 하단 큰 이미지, thumbnail=우측 작은 썸네일, both=둘 다 표시",
+  "image_canvas_size": [
+    960,
+    540
+  ],
+  "_image_canvas_size_comment": "이미지를 Discord에 올리기 전 이 크기의 투명 PNG 캔버스로 정규화합니다. 16:9 배너 기준 기본값은 [960, 540].",
+  "daily_bosses": {
+    "드레이크": {
+      "times": [
+        "06:00",
+        "12:00",
+        "18:00",
+        "00:00"
+      ],
+      "alert_minutes": 20,
+      "image": "Images/boss/드레이크.png"
+    }
+  },
+  "_close_minutes_comment": "보스 출현 시각 기준 자동 마감까지의 분(min). 0 = 출현 정각 마감, null/항목 제거/음수 = 자동 마감하지 않음. 예: 20 → 보스 출현 후 20분 마감.",
+  "bosses": {
+    "네크로맨서": {
+      "interval_hours": 2,
+      "start_hour": 1,
+      "start_minute": 0,
+      "image": "Images/boss/네크로맨서.png"
+    }
+  },
+  "point_cycle_anchor": "2026-07-06 18:00",
+  "_point_cycle_anchor_comment": "포인트 2주 사이클 기준 시각 (YYYY-MM-DD HH:MM, 월요일 18:00 권장). 이 시각부터 14일 단위로 포인트가 초기화됨."
+}

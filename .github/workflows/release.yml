@@ -1,0 +1,57 @@
+name: Build & Release
+
+# v로 시작하는 태그(예: v1.0.1)를 push하면 설치파일을 빌드해 Release에 올린다.
+# 태그는 version.py의 VERSION과 같아야 한다.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Check version matches tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $v = (python -c "import version; print(version.VERSION)").Trim()
+          if ("v$v" -ne "${{ github.ref_name }}") { throw "version.py($v) != tag(${{ github.ref_name }})" }
+
+      - name: Tests
+        run: python Tests/test_boss_auction.py
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+
+      - name: Build
+        shell: pwsh
+        run: .\build.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RaidBook_Setup
+          path: dist/installer/*.exe
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/installer/*.exe
+          generate_release_notes: true

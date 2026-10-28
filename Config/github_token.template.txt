@@ -1,0 +1,3 @@
+# Private GitHub repo 릴리즈 업데이트 확인용 Personal Access Token
+# 이 파일을 github_token.txt로 복사한 뒤, 아래 안내 문구를 지우고 토큰 한 줄만 남기세요.
+# 토큰 권한: repo (releases 읽기)

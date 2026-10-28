@@ -1,0 +1,41 @@
+{
+  "token": "",
+  "admin_channel_id": null,
+  "base_dir": "",
+  "restart_delay_seconds": 5,
+  "update_check": {
+    "enabled": true,
+    "interval_hours": 6,
+    "_comment": "GitHub 최신 릴리즈 자동 확인. 새 버전 발견 시 admin 채널에 알림 (버전당 1회)"
+  },
+  "max_rapid_restarts": 5,
+  "rapid_restart_window_seconds": 60,
+  "network_check": {
+    "enabled": true,
+    "interval_seconds": 60,
+    "timeout_seconds": 5,
+    "connect_attempts": 2,
+    "targets": [
+      {
+        "name": "Discord Gateway",
+        "host": "gateway.discord.gg",
+        "port": 443
+      },
+      {
+        "name": "Discord API",
+        "host": "discord.com",
+        "port": 443
+      }
+    ]
+  },
+  "ipc": {
+    "boss": 7701
+  },
+  "bots": [
+    {
+      "name": "Boss Bot",
+      "script": "RaidBook_Boss_Bot.py",
+      "enabled": true
+    }
+  ]
+}
