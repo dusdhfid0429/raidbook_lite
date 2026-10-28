@@ -1344,13 +1344,16 @@ class LootModal(ui.Modal, title="획득 아이템 기록"):
             pass
 
 
-def _closed_alert_view(v, loot):
-    """마감된 알림을 다시 그릴 때 쓸 버튼 — 인원체크 등 마감 버튼이 꺼진 새 인스턴스.
-    v 는 재시작 후 모든 메시지가 공유하는 persistent 인스턴스일 수 있어 그대로 쓰면 버튼이 다시 켜진다."""
+def _alert_view(v, loot, *, expired):
+    """알림을 다시 그릴 때 쓸 버튼 — 상태(진행 중/마감)에 맞춘 새 인스턴스.
+    v 는 재시작 후 모든 메시지가 공유하는 persistent 인스턴스일 수 있다. 그 버튼 상태는 마지막으로 눌린
+    다른 알림의 상태라서 그대로 쓰면 진행 중 알림의 인원체크가 꺼지거나, 마감 알림의 인원체크가 켜진다."""
     view = AttendView(boss_name=v.boss_name, boss_time=v.boss_time, created_date=v.created_date,
-                      loot=loot, expired=True, disable_time=v.disable_time)
+                      loot=loot, expired=expired, disable_time=v.disable_time)
     view.message_id = v.message_id
-    if getattr(v, "party_confirmed", False):
+    info = load_active_messages().get(str(v.message_id))
+    confirmed = info.get("party_confirmed", False) if info else getattr(v, "party_confirmed", False)
+    if confirmed:
         view.party_confirmed = True
         view._apply_confirmed_button_state()
     return view
@@ -1423,7 +1426,7 @@ async def _commit_loot_record(v, interaction, new_text, new_acquirers, opened_re
                     await _edit_message_with_image(
                         target_msg,
                         embed=embed,
-                        view=v,
+                        view=_alert_view(v, new_text, expired=False),
                         image_file=image_file,
                         content=_boss_alert_content(v.boss_name, v.boss_time),
                     )
@@ -1471,7 +1474,7 @@ async def _commit_loot_record(v, interaction, new_text, new_acquirers, opened_re
                     await _edit_message_with_image(
                         target_msg,
                         embed=embed,
-                        view=_closed_alert_view(v, new_text),
+                        view=_alert_view(v, new_text, expired=True),
                         image_file=image_file,
                         content=_boss_alert_content(v.boss_name, v.boss_time, expired=True),
                     )
