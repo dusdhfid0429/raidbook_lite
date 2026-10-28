@@ -20,4 +20,4 @@ python -m pyflakes *.py
 ```
 
 ## 릴리즈
-`version.py` 버전 올림 → `git tag vX.Y.Z` push → Actions(`.github/workflows/release.yml`)가 설치파일을 Release에 업로드 → 설치판은 업데이트 버튼으로 받음.
+`version.py` 버전 올려 main에 push → Actions(`.github/workflows/release.yml`)가 설치파일을 Release에 업로드 → 설치판은 업데이트 버튼으로 받음.

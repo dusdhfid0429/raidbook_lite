@@ -35,7 +35,7 @@ GITHUB_REPO = "raidbook_lite"
 
 # 빌드 정보
 BUILD_DATE = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-BUILD_TYPE = "Release"  # Release, Debug
+BUILD_TYPE = "Release"  # Release, Debug (main에 VERSION 변경 push 시 자동 릴리즈)
 
 
 def get_version_info():

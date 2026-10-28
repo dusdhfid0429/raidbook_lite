@@ -15,7 +15,7 @@ Discord 보스 알림 · 음성채널 인원체크 · 전리품 경매 봇 (Watc
 
 ## 릴리즈 (개발자)
 1. `version.py`의 `VERSION_*` 올리기
-2. `git tag v1.0.1 && git push origin v1.0.1`
+2. main에 push (version.py 변경이 감지되면 자동 빌드)
 3. GitHub Actions가 Windows에서 빌드 → Release에 설치파일 업로드
 
 ## 소스 실행
