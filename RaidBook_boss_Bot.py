@@ -1641,7 +1641,7 @@ class ModalOpenView(discord.ui.View):
 
 
 async def _apply_board_results(board):
-    """진행판이 끝나면 결과를 원본 보스 알림(embed)과 득템 기록(Excel 획득자 칸)에 남긴다."""
+    """진행판이 끝나면 결과를 득템 기록(Excel 획득자 칸)에 남긴다. 공개 보스 알림에는 싣지 않는다."""
     mid = board.get("source_message_id")
     # 재경매로 진행판이 여러 개면 아이템별 최신 결과로 합친다 (앞 낙찰 결과를 덮어쓰지 않도록)
     results = (lots_results_text(merge_board_lots(boss_auction.boards_for_source(mid)))
@@ -1660,15 +1660,16 @@ async def _apply_board_results(board):
         bundle = await asyncio.to_thread(load_expired_message_bundle, int(mid))
         boss_name, boss_time, loot = bundle["boss_name"], bundle["boss_time"], bundle["loot"]
     await save_boss_loot_to_excel(int(mid), boss_name, boss_time, loot, "경매", acquirers=results)
-    # 알림 embed의 결과 줄만 바꿔 다시 그림 (버튼·이미지는 그대로)
+    # 경매 결과는 알림에 싣지 않는다 — 이전 버전이 남긴 결과 줄이 있으면 지움 (버튼·이미지는 그대로)
     try:
         ch = bot.get_channel(ALERT_CHANNEL_ID) or await bot.fetch_channel(ALERT_CHANNEL_ID)
         msg = await ch.fetch_message(int(mid))
         if msg.embeds:
             embed = msg.embeds[0]
             desc = re.sub(r"\n(👤 \*\*획득자\*\*|🏆 \*\*경매 결과\*\*): [^\n]*", "", embed.description or "")
-            embed.description = f"{desc}\n🏆 **경매 결과**: {results}"
-            await _edit_message_with_image(msg, embed=embed)
+            if desc != (embed.description or ""):
+                embed.description = desc
+                await _edit_message_with_image(msg, embed=embed)
     except Exception as e:
         log.info(f"[진행판 결과 → 알림 갱신 실패] {mid}: {type(e).__name__}: {e}")
     log.info(f"[진행판 결과 반영] {boss_name} {boss_time} {mid} | {results[:120]}")
@@ -2439,9 +2440,9 @@ def make_attend_embed(boss_name, count, names, boss_time=None, expired=False, lo
         desc += f"\n\n{countdown_text}"
     if loot:
         desc += f"\n\n🎁 **획득 아이템**: {loot}"
-        if loot_acquirers:
-            label = "🏆 **경매 결과**" if LOOT_AUCTION_BUTTON else "👤 **획득자**"
-            desc += f"\n{label}: {loot_acquirers}"
+        # 경매 모드에서는 낙찰자·낙찰가를 공개 알림에 싣지 않는다 (경매장 메시지와 Excel에만)
+        if loot_acquirers and not LOOT_AUCTION_BUTTON:
+            desc += f"\n👤 **획득자**: {loot_acquirers}"
     embed.description = desc
     _apply_embed_image(embed, thumbnail_file=thumbnail_file, image_url=image_url, image_filename=image_filename)
     return embed
