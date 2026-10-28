@@ -31,10 +31,22 @@ class _Resp:
         self.record.append(("reject", text))
 
 
-def _interaction(uid, mid, record, delay):
+def _message(mid, refreshed):
+    async def edit(**kw):
+        refreshed.append(kw["embed"])
+    return SimpleNamespace(id=mid, edit=edit)
+
+
+def _embed_text(embed):
+    parts = [embed.title or "", embed.description or ""]
+    parts += [f"{f.name} {f.value}" for f in embed.fields]
+    return "\n".join(parts)
+
+
+def _interaction(uid, mid, record, delay, message=None):
     return SimpleNamespace(
         user=SimpleNamespace(id=uid, display_name=f"u{uid}"),
-        message=SimpleNamespace(id=mid, edit=None),
+        message=message or SimpleNamespace(id=mid, edit=None),
         created_at=datetime.now(timezone.utc),
         response=_Resp(delay, record))
 
@@ -49,11 +61,13 @@ def test_burst_bids_board():
         ba.board_start_next(board, time.time() - 1)
         a.store.save(1, board)
         view = ba.BoardView(a, state="active")
-        record = []
+        record, refreshed = [], []
+        ba.REFRESH_DELAY_SEC = 0.1
+        msg = _message(1, refreshed)
         # 3명이 번갈아 20번, 같은 사람 연속 클릭도 섞음 → 각 응답 0.2초 걸림
         uids = [1, 2, 2, 3, 1, 1, 2, 3, 3, 1, 2, 1, 3, 2, 2, 1, 3, 1, 2, 3]
         t0 = time.monotonic()
-        await asyncio.gather(*[view.bid_btn.callback(_interaction(u, 1, record, 0.2)) for u in uids])
+        await asyncio.gather(*[view.bid_btn.callback(_interaction(u, 1, record, 0.2, msg)) for u in uids])
         took = time.monotonic() - t0
         lot = a.store.get(1)["lots"][0]
         edits = [r for r in record if r[0] == "edit"]
@@ -63,6 +77,10 @@ def test_burst_bids_board():
         assert lot["current_price"] == 100_000 + 10_000 * (len(edits) - 1)
         assert all("최고 입찰자" in r[1] for r in rejects)        # 거부는 같은 사람 연속 입찰뿐
         assert took < 1.0, took                                  # 응답이 잠금 밖이라 직렬로 쌓이지 않음 (20×0.2=4초 아님)
+        # 클릭별 응답이 어떤 순서로 도착해도, 연타가 멈추면 최종 입찰자로 딱 한 번 다시 그린다
+        await asyncio.sleep(0.4)
+        assert len(refreshed) == 1, len(refreshed)
+        assert f"u{lot['bidder_id']}" in _embed_text(refreshed[0]), _embed_text(refreshed[0])
         saved = ba.AuctionStore(os.path.join(d, "boss_auction_state.json")).get(1)["lots"][0]
         assert saved["bid_count"] == lot["bid_count"]            # 파일에도 마지막 입찰까지 저장
 

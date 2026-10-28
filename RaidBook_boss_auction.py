@@ -34,6 +34,7 @@ from discord import ui
 from RaidBook_common import write_json_atomic
 
 CLOSE_GRACE_SEC = 0.8   # 마감 직전 클릭의 네트워크·처리 지연 허용 (판정은 클릭 시각 기준)
+REFRESH_DELAY_SEC = 1.0   # 연타가 멈춘 뒤 최종 상태로 다시 그리기까지 대기
 
 AMOUNT_HINT = "숫자 또는 단위 표기 (예: 80만, 1.5억, 120만5천, 3,750,000)"
 
@@ -190,6 +191,7 @@ class BossAuction:
         self.currency = currency
         self.lock = asyncio.Lock()
         self._close_tasks = {}
+        self._refresh_tasks = {}   # 메시지ID → 연타 후 마지막 상태로 다시 그리는 예약
         self.clock_offset = 0.0   # PC 시계 − Discord 시계 (초)
         # 경매 진행판 전체 종료 콜백 async (board) -> None (보스 알림에 결과 반영)
         self.on_board_finished = None
@@ -232,6 +234,37 @@ class BossAuction:
             await interaction.message.edit(**kwargs)
         except Exception as e:
             self.log.info(f"[경매 메시지 수정 실패] {type(e).__name__}: {e}")
+
+    def schedule_refresh(self, message, delay=None):
+        """연타가 끝난 뒤 저장된 최신 상태로 메시지를 한 번 더 그린다.
+        클릭마다 보내는 수정 요청은 Discord에 도착하는 순서가 뒤바뀔 수 있어, 앞선 클릭의 화면이
+        마지막에 적용되면 최종 입찰자가 이전 사람으로 보인다 — 마지막 클릭 뒤 delay초 조용하면 최종 상태로 덮어쓴다."""
+        key = str(message.id)
+        old = self._refresh_tasks.pop(key, None)
+        if old and not old.done():
+            old.cancel()
+
+        async def _run():
+            try:
+                await asyncio.sleep(REFRESH_DELAY_SEC if delay is None else delay)
+                latest = self.store.get(message.id)
+                if not latest:
+                    return
+                if latest.get("type") == "board":
+                    embed = build_board_embed(latest, self.currency, self.discord_now())
+                else:
+                    embed = build_embed(latest, self.currency)
+                await message.edit(embed=embed, view=self.view_for(latest))
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                self.log.info(f"[경매 최종 갱신 실패] {key}: {type(e).__name__}: {e}")
+            finally:
+                if self._refresh_tasks.get(key) is task:
+                    self._refresh_tasks.pop(key, None)
+
+        task = asyncio.ensure_future(_run())
+        self._refresh_tasks[key] = task
 
     def view_for(self, rec):
         if (rec or {}).get("type") == "board":
@@ -607,6 +640,7 @@ class AuctionView(ui.View):
                    f"{price:,} | {count}회 | msg {mid}")
         latest = a.store.get(mid) or rec   # 응답 순서가 뒤바뀌어도 항상 최신 상태로 그린다
         await a.respond_edit(interaction, embed=build_embed(latest, a.currency), view=a.view_for(latest))
+        a.schedule_refresh(interaction.message)   # 연타 뒤 최종 입찰자로 확정 표시
 
     @ui.button(label="경매종료", emoji="⏹️", style=discord.ButtonStyle.secondary, custom_id="boss_auc_stop")
     async def stop_btn(self, interaction: discord.Interaction, button: ui.Button):
@@ -1182,6 +1216,7 @@ class BoardView(ui.View):
         if latest:
             await a.respond_edit(interaction, embed=build_board_embed(latest, a.currency, a.discord_now()),
                                  view=a.view_for(latest))
+        a.schedule_refresh(interaction.message)   # 연타 뒤 최종 입찰자로 확정 표시
 
     @ui.button(label="종료", emoji="⏹️", style=discord.ButtonStyle.secondary, custom_id="boss_board_stop")
     async def stop_btn(self, interaction: discord.Interaction, button: ui.Button):

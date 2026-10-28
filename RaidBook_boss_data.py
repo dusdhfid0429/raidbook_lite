@@ -260,11 +260,25 @@ def upsert_attendance_records(
     raw_headers,
     apply_header=None,
     now_str="",
+    prune=False,
 ):
-    """Append missing attendance rows for a boss message and return the target sheet."""
+    """Append missing attendance rows for a boss message and return the target sheet.
+    prune=True: 이 메시지의 행 중 attendees에 없는 참석자 행을 지운다 (참석자 목록이 데이터 기준).
+    attendees가 비어 있으면 지우지 않는다 — 조회 실패로 빈 목록이 와도 기존 기록 보존."""
     ws = ensure_raw_sheet(wb, sheet_name, raw_headers, apply_header=apply_header)
     cols = resolve_columns(ws, BOSS_SCHEMA)
     target = str(message_id)
+    if prune and attendees and cols.get("msg_id") and cols.get("uid"):
+        keep = {str(u) for u in attendees}
+        drop = []
+        for r in range(2, ws.max_row + 1):
+            if str(ws.cell(row=r, column=cols["msg_id"]).value or "") != target:
+                continue
+            uid = ws.cell(row=r, column=cols["uid"]).value
+            if uid in (None, "") or str(uid) not in keep:
+                drop.append(r)
+        for r in reversed(drop):
+            ws.delete_rows(r)
     existing_keys = set()
     existing_message = False
     for rec in iter_attend_rows(ws, BOSS_SCHEMA):

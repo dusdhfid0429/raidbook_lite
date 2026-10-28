@@ -955,8 +955,9 @@ async def save_boss_loot_to_excel(message_id, boss_name, boss_time, loot_text, e
             return False, ""
 
 
-async def save_boss_attendees_to_excel(message_id, boss_name, boss_time, attendees, created_date=None):
-    """마감 시 참석자 목록을 한 번에 Excel에 저장"""
+async def save_boss_attendees_to_excel(message_id, boss_name, boss_time, attendees, created_date=None, *, prune=False):
+    """마감 시 참석자 목록을 한 번에 Excel에 저장.
+    prune=True: 목록에 없는 이 알림의 기존 참석 행 삭제 (취소·인원체크 제외 반영, 저장 전 롤링 백업 유지)"""
     async with excel_lock:
         today = created_date or datetime.now().strftime("%Y-%m-%d")
         try:
@@ -975,6 +976,7 @@ async def save_boss_attendees_to_excel(message_id, boss_name, boss_time, attende
                 raw_headers=RAW_HEADERS,
                 apply_header=apply_header,
                 now_str=now_str,
+                prune=prune,
             )
 
             apply_border_all(ws)
@@ -2029,7 +2031,8 @@ class AttendView(ui.View):
         )
 
         # 마감 시 참석자 데이터를 Excel에 일괄 저장
-        await save_boss_attendees_to_excel(self.message_id, self.boss_name, self.boss_time, self.attendees, self.created_date)
+        await save_boss_attendees_to_excel(self.message_id, self.boss_name, self.boss_time, self.attendees,
+                                           self.created_date, prune=True)
 
     def _restore_from_message(self, message_id):
         """봇 재시작 후 클릭 시 JSON → Excel 순으로 데이터 복구. 다른 메시지면 재복구."""
@@ -2278,7 +2281,7 @@ class AttendView(ui.View):
                     try:
                         await save_boss_attendees_to_excel(
                             self.message_id, self.boss_name, self.boss_time,
-                            self.attendees, self.created_date)
+                            self.attendees, self.created_date, prune=True)
                     except Exception as e:
                         log.info(f"[취소-즉시저장 실패] {e}")
             else:
@@ -2339,8 +2342,8 @@ class AttendView(ui.View):
             if result is None:
                 text = "⏰ 이미 마감된 알림이에요."
             else:
-                added, total = result
-                text = f"🎙️ 음성채널 인원체크 완료 — 신규 {added}명, 총 {total}명"
+                added, total, removed = result
+                text = f"🎙️ 음성채널 인원체크 완료 — 신규 {added}명, 제외 {removed}명, 총 {total}명"
         log.info(f"[인원체크 버튼] msg:{interaction.message.id} user:{interaction.user.id} | {result}")
         try:
             await interaction.followup.send(text, ephemeral=True)
@@ -2935,8 +2938,12 @@ def _collect_voice_members(guild, voice_channel=None) -> dict:
 
 
 async def voice_check_message(message_id, voice_channel=None) -> tuple | None:
-    """활성 보스 알림 1건에 음성채널 접속자를 참석자로 추가하고 메시지 갱신.
-    [참석] 로그를 남겨 마감 시 로그 검증에서도 유지된다. 반환: (추가 수, 총원) / 활성 아님 None."""
+    """활성 보스 알림 1건의 참석자를 지금 음성채널 접속자로 맞추고 메시지 갱신.
+    새로 들어온 사람은 [참석], 이전 체크엔 있었지만 지금 없는 사람은 [취소] 로그를 남겨
+    마감 시 로그 검증에서도 같은 결과가 된다.
+    voice_channel 지정(/인원체크를 한 음성채널만 확인) 시에는 다른 채널 인원을 모르므로 추가만 한다.
+    접속자가 0명이면 조회 실패일 수 있어 제거하지 않는다.
+    반환: (추가 수, 총원, 제거 수) / 활성 아님 None."""
     key = str(message_id)
     info = load_active_messages().get(key)
     if not info:
@@ -2951,6 +2958,8 @@ async def voice_check_message(message_id, voice_channel=None) -> tuple | None:
     members = _collect_voice_members(ch.guild, voice_channel)
 
     added = []
+    removed = []
+    prune = voice_channel is None and bool(members)
     with active_messages_lock:
         data = load_active_messages()
         info = data.get(key)
@@ -2958,16 +2967,24 @@ async def voice_check_message(message_id, voice_channel=None) -> tuple | None:
             return None
         attendees = list(info.get("attendees", []))
         label = f"{info.get('boss_name', '')} {info.get('boss_time', '')}"
+        if prune:
+            id_to_name = _load_id_to_name_mapping()
+            for uid in [u for u in attendees if str(u) not in members]:
+                attendees.remove(uid)
+                removed.append(uid)
+                log.info(rb_att.attend_log_line("취소", label, key, id_to_name.get(str(uid), uid),
+                                                uid, len(attendees)))
         for uid, name in members.items():
             if uid in attendees:
                 continue
             attendees.append(uid)
             added.append((uid, name))
             log.info(rb_att.attend_log_line("참석", label, key, name, uid, len(attendees)))
-        if added:
+        if added or removed:
             info["attendees"] = attendees
             write_active_messages(data)
-    log.info(f"[인원체크] {label} | 음성 {len(members)}명, 신규 {len(added)}명, 총 {len(attendees)}명")
+    log.info(f"[인원체크] {label} | 음성 {len(members)}명, 신규 {len(added)}명, 제외 {len(removed)}명, "
+             f"총 {len(attendees)}명")
 
     for uid, name in added:
         update_user_mapping(uid, name)
@@ -2977,10 +2994,10 @@ async def voice_check_message(message_id, voice_channel=None) -> tuple | None:
     _cm = config.get("close_minutes")
     try: _cm = int(_cm) if _cm is not None else None
     except Exception: _cm = None
-    if added and (_cm is None or _cm < 0):
+    if (added or removed) and (_cm is None or _cm < 0):
         try:
             await save_boss_attendees_to_excel(int(key), info.get("boss_name", ""), info.get("boss_time", ""),
-                                               attendees, info.get("created_date"))
+                                               attendees, info.get("created_date"), prune=True)
         except Exception as e:
             log.info(f"[인원체크-즉시저장 실패] {e}")
 
@@ -3006,7 +3023,7 @@ async def voice_check_message(message_id, voice_channel=None) -> tuple | None:
                                        content=_boss_alert_content(view.boss_name, view.boss_time))
     except Exception as e:
         log.info(f"[인원체크-메시지 갱신 실패] {key}: {type(e).__name__}: {e}")
-    return len(added), len(attendees)
+    return len(added), len(attendees), len(removed)
 
 
 def _schedule_voice_check(message_id, spawn_dt):
