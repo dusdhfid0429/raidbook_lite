@@ -42,23 +42,25 @@ def test_lots_expand_quantity():
     assert [ba.lot_label(x) for x in lots] == ["집행검", "반지 (1/2)", "반지 (2/2)"]
 
 
-def test_board_sequence_and_results():
+def test_board_manual_sequence_and_results():
     lots, _ = ba.parse_board_lots("집행검 100만 10만\n반지 x2", D)
     board = {"lots": lots, "status": "active", "current": None}
+    assert ba.board_state(board) == "waiting"          # 게시 직후 = 관리자 ▶️ 대기
     first = ba.board_start_next(board, 1000)
-    assert first is lots[0] and first["status"] == "active" and board["current"] == 0
+    assert first is lots[0] and ba.board_state(board) == "active"
     assert ba.close_deadline(first) == 1005
     assert ba.apply_bid(first, 1, "홍길동", now=1002)[0]
     assert ba.apply_bid(first, 2, "김철수", now=1003)[0]
     assert first["current_price"] == 1_100_000
     assert ba.board_close_current(board)["bidder_name"] == "김철수"
-    second = ba.board_start_next(board, 1010)
-    assert second is lots[1]
-    ba.board_close_current(board)          # 유찰
-    third = ba.board_start_next(board, 1020)
-    assert third is lots[2]
-    third["status"] = "cancelled"          # 종료 버튼 시나리오
-    assert ba.board_start_next(board, 1030) is None and board["status"] == "closed"
+    assert ba.board_after_close(board) is False
+    assert ba.board_state(board) == "waiting"          # 다음 아이템은 자동 시작 안 함
+    assert lots[1]["status"] == "pending"
+    ba.board_start_next(board, 1010)
+    ba.board_close_current(board)                      # 유찰
+    ba.board_after_close(board)
+    lots[2]["status"] = "cancelled"                    # 종료 버튼 시나리오
+    assert ba.board_after_close(board) is True and ba.board_state(board) == "closed"
     assert ba.board_results_text(board) == "집행검 김철수 110만 · 반지 (1/2) 유찰 · 반지 (2/2) 취소"
 
 
@@ -72,9 +74,9 @@ def test_board_embed_builds():
     lots, _ = ba.parse_board_lots("집행검\n반지", D)
     board = {"lots": lots, "status": "active", "current": None, "boss_name": "드레이크", "boss_time": "18:00",
              "source_message_id": "1"}
-    ba.board_start_next(board, 2000)
     e = ba.build_board_embed(board, "아데나", now=1990)
-    assert "진행판" in e.title and "⏳ 시작" in [f.name for f in e.fields]
+    assert "⏸️ 다음 경매" in [f.name for f in e.fields]
+    ba.board_start_next(board, 2000)
     e = ba.build_board_embed(board, "아데나", now=2001)
     assert "⏱️ 마감" in [f.name for f in e.fields]
 

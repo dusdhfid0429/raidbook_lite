@@ -246,10 +246,8 @@ ATTEND_BUTTON_IDS = ("boss_join", "boss_cancel", "boss_voicecheck")
 LOOT_AUCTION_BUTTON = bool(config.get("loot_auction_button", False))
 # 구버전 방식: 전리품 공지 메시지의 🔨 경매시작 버튼 → 세팅 입력 → ▶️ 시작 (기본 꺼짐)
 LOOT_AUCTION_LEGACY = bool(config.get("loot_auction_legacy", False))
-# 진행판 기본값 "시작가 호가 카운트" (입력 창에 미리 채워짐), 첫 아이템 시작 대기·아이템 간 간격(초)
+# 진행판 기본값 "시작가 호가 카운트" (입력 창에 미리 채워짐)
 AUCTION_DEFAULTS = parse_board_defaults(config.get("auction_defaults", ""))
-AUCTION_START_DELAY = int(config.get("auction_start_delay_sec", 10) or 0)
-AUCTION_GAP = int(config.get("auction_gap_sec", 3) or 0)
 AUCTION_CHANNEL_ID = int(config.get("auction_channel_id") or 0)
 AUCTION_CURRENCY = str(config.get("auction_currency", "아데나") or "")
 # 설정된 채널이 없거나 삭제됐으면 시작 시 "RaidBook" 카테고리에 자동 생성 (채널 관리 권한 필요)
@@ -2756,8 +2754,6 @@ def _is_bot_admin(member) -> bool:
 boss_auction = BossAuction(bot, channel_id=AUCTION_CHANNEL_ID, data_dir=DATA_DIR,
                            is_admin=_is_bot_admin, logger=log, currency=AUCTION_CURRENCY,
                            get_attendees=_boss_attendees_for)
-boss_auction.board_start_delay = AUCTION_START_DELAY
-boss_auction.board_gap = AUCTION_GAP
 boss_auction.on_board_finished = _apply_board_results
 
 
