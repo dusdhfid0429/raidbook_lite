@@ -242,6 +242,8 @@ VOICE_CHECK_AT_SPAWN = bool(config.get("voice_check_at_spawn", True))
 HIDE_ATTEND_BUTTONS = bool(config.get("hide_attend_buttons", False))
 # 마감 시 비활성화되는 참석 계열 버튼
 ATTEND_BUTTON_IDS = ("boss_join", "boss_cancel", "boss_voicecheck")
+# 득템 채널 공지 — 💎 득템·경매(진행판)를 쓰면 기록·결과가 알림 메시지에 남으므로 기본 꺼짐
+LOOT_ANNOUNCE = bool(config.get("loot_announce", not config.get("loot_auction_button", False)))
 # 보스 알림의 💎 득템·경매 — 아이템 입력 한 번으로 득템 기록 + 경매 진행판 자동 진행 (RaidBook_boss_auction)
 LOOT_AUCTION_BUTTON = bool(config.get("loot_auction_button", False))
 # 구버전 방식: 전리품 공지 메시지의 🔨 경매시작 버튼 → 세팅 입력 → ▶️ 시작 (기본 꺼짐)
@@ -1468,7 +1470,7 @@ async def _commit_loot_record(v, interaction, new_text, new_acquirers, opened_re
         is_loot_update = bool((old_loot or "").strip())
         announcement_id = existing_ann
         # 아이템이 같아도 공지가 없으면(채널 변경·삭제 등) 다시 게시되도록 항상 확인
-        if new_text:
+        if new_text and LOOT_ANNOUNCE:
             announcement_id = await _post_or_update_loot_announcement(
                 v.message_id, v.boss_name, v.boss_time, new_text, editor,
                 guild_id, existing_announcement_id=existing_ann or None,
@@ -1489,7 +1491,7 @@ async def _commit_loot_record(v, interaction, new_text, new_acquirers, opened_re
                         v.message_id, v.boss_name, v.boss_time, new_text, editor,
                         announcement_msg_id=announcement_id,
                     )
-        elif not new_text and loot_changed and (existing_ann or is_loot_update):
+        elif LOOT_ANNOUNCE and not new_text and loot_changed and (existing_ann or is_loot_update):
             await _delete_loot_announcement_common(
                 bot=bot,
                 loot_channel_id=LOOT_CHANNEL_ID,
@@ -1518,7 +1520,7 @@ async def _commit_loot_record(v, interaction, new_text, new_acquirers, opened_re
             ack = f"🧹 {editor}님, 획득 아이템 기록을 비웠어요."
         if not ok:
             ack += "\n⚠️ 단, 엑셀 저장은 실패했어요. 엑셀이 열려있는지 확인해 주세요."
-        if new_text and announcement_id is None:
+        if LOOT_ANNOUNCE and new_text and announcement_id is None:
             if is_loot_update:
                 ack += "\n⚠️ 기존 득템 채널 공지를 찾지 못해 새 공지는 만들지 않았어요."
             else:
@@ -4914,8 +4916,9 @@ async def _ensure_boss_channels():
     specs = [
         ChannelSpec("alert_channel_id", "보탐-알림"),
         ChannelSpec("command_channel_id", "보탐-명령"),
-        ChannelSpec("loot_channel_id", "전리품"),
     ]
+    if LOOT_ANNOUNCE:
+        specs.append(ChannelSpec("loot_channel_id", "전리품"))
     if LOOT_AUCTION_BUTTON:
         specs.append(ChannelSpec("auction_channel_id", "경매장"))
     # 음성채널 목록이 비어 있으면 '서버 전체 음성채널' 모드 — 음성채널이 하나도 없을 때만 만든다

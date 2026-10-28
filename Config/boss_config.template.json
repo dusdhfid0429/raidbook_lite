@@ -7,6 +7,8 @@
   "base_dir": "",
   "alert_channel_id": null,
   "command_channel_id": null,
+  "loot_announce": false,
+  "_loot_announce_comment": "true면 득템 기록 시 득템 채널(loot_channel_id)에 공지. 💎 득템·경매를 쓰면 필요 없음",
   "loot_channel_id": null,
   "loot_force_user_ids": [],
   "daily_refresh_hour": 0,
