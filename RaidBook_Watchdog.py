@@ -74,6 +74,9 @@ log.addHandler(_file)
 
 # ── 설정 ──────────────────────────────────────────────────────────────────
 BOTS = config.get("bots", [])
+# 음악 봇(v1.0.17~)은 기존 설치본 config에 없으므로 자동으로 감시 대상에 추가 (끄려면 enabled=false)
+if not any(str(b.get("script", "")).lower() == "raidbook_music_bot.py" for b in BOTS):
+    BOTS.append({"name": "Music Bot", "script": "RaidBook_Music_Bot.py", "enabled": True})
 RESTART_DELAY = config.get("restart_delay_seconds", 5)
 MAX_RAPID_RESTARTS = config.get("max_rapid_restarts", 5)
 RAPID_RESTART_WINDOW = config.get("rapid_restart_window_seconds", 60)

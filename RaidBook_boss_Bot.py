@@ -69,6 +69,7 @@ from RaidBook_loot import (
     post_or_update_loot_announcement as _post_or_update_loot_announcement_common,
 )
 from RaidBook_users import UserStore
+from RaidBook_music import sync_guild_keeping
 from RaidBook_party import compose_parties, format_party_embed_fields, load_party_config
 from config_helper import (
     ensure_config_from_template,
@@ -241,6 +242,18 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+_default_tree_on_error = bot.tree.on_error
+
+
+async def _tree_on_error(interaction, error):
+    # 같은 토큰을 쓰는 음악 봇의 /재생 등은 이 프로세스에 명령이 없으므로 조용히 무시
+    if isinstance(error, discord.app_commands.CommandNotFound):
+        return
+    await _default_tree_on_error(interaction, error)
+
+
+bot.tree.on_error = _tree_on_error
 
 ALERT_CHANNEL_ID = config["alert_channel_id"]
 COMMAND_CHANNEL_ID = config.get("command_channel_id", ALERT_CHANNEL_ID)
@@ -5371,7 +5384,8 @@ async def _sync_slash_commands():
     for guild in bot.guilds:
         try:
             bot.tree.copy_global_to(guild=guild)
-            synced = await bot.tree.sync(guild=guild)
+            # 같은 토큰을 쓰는 음악 봇(RaidBook_Music_Bot)의 /재생 등은 지우지 않고 유지
+            synced = await sync_guild_keeping(bot.tree, guild)
             log.info(f"[슬래시 동기화] {guild.name}({guild.id}) {len(synced)}개")
         except Exception as e:
             log.warning(f"[슬래시 동기화 실패] {guild.name}({guild.id}): {type(e).__name__}: {e}")

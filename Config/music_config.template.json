@@ -1,0 +1,17 @@
+{
+  "token": "",
+  "_token_comment": "비워 두면 Boss Bot 토큰을 같이 사용 (프로그램만 분리). 별도 음악 봇을 쓰려면 그 봇의 토큰 입력",
+  "base_dir": "",
+  "command_channel_ids": [],
+  "_command_channel_ids_comment": "음악 명령을 받을 채널 ID 목록. 비우면 모든 채널에서 사용 가능",
+  "control_role_ids": [],
+  "_control_role_ids_comment": "봇과 같은 음성채널에 없어도 건너뛰기/정지/볼륨을 할 수 있는 역할 ID (서버 관리 권한자는 항상 가능)",
+  "youtube_only": true,
+  "default_volume": 50,
+  "max_queue": 50,
+  "max_playlist": 30,
+  "_max_playlist_comment": "재생목록 링크에서 한 번에 가져올 최대 곡 수",
+  "idle_disconnect_seconds": 300,
+  "auto_update_ytdlp": true,
+  "_auto_update_ytdlp_comment": "yt-dlp(유튜브 해석 도구)를 하루 한 번 자동 업데이트 — 유튜브 변경 시 재생 실패 방지"
+}

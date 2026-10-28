@@ -39,6 +39,11 @@
       "name": "Boss Bot",
       "script": "RaidBook_Boss_Bot.py",
       "enabled": true
+    },
+    {
+      "name": "Music Bot",
+      "script": "RaidBook_Music_Bot.py",
+      "enabled": true
     }
   ]
 }

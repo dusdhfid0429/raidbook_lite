@@ -53,6 +53,8 @@ Name: "{commonappdata}\RaidBook\Log"
 [Files]
 Source: "dist\RaidBook.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\RaidBook_Boss_Bot.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\RaidBook_Music_Bot.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "Config\*.template.*"; DestDir: "{app}\Config"; Flags: ignoreversion
 Source: "Config\*.template.*"; DestDir: "{commonappdata}\RaidBook\Config"; Flags: ignoreversion
 Source: "Images\*"; DestDir: "{app}\Images"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -83,6 +85,7 @@ var
 begin
   Exec('taskkill.exe', '/F /IM RaidBook.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('taskkill.exe', '/F /IM RaidBook_Boss_Bot.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('taskkill.exe', '/F /IM RaidBook_Music_Bot.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Sleep(1500);
 end;
 
