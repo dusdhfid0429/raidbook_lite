@@ -47,13 +47,11 @@ from RaidBook_boss_auction import (
     AuctionView,
     BoardView,
     BossAuction,
+    LotCreateModal,
     auction_options,
     board_results_text,
-    fmt_amount_kr,
     lots_results_text,
-    make_lot,
     merge_board_lots,
-    parse_amount_kr,
     parse_board_defaults,
 )
 from RaidBook_loot import (
@@ -1570,62 +1568,6 @@ class LootRecordModal(ui.Modal, title="📦 획득 아이템"):
         await interaction.followup.send(ack, ephemeral=True)
 
 
-class AuctionCreateModal(ui.Modal, title="🔨 경매 생성"):
-    """기록된 획득 아이템 중 하나를 골라 시작가·호가·카운트를 각각 입력 → 경매장에 경매 메시지."""
-
-    def __init__(self, *, message_id, boss_name, boss_time, options):
-        super().__init__()
-        self.message_id = message_id
-        self.boss_name = boss_name
-        self.boss_time = boss_time
-        self.options = options
-        self.item_select = ui.Select(
-            placeholder="경매할 아이템을 고르세요",
-            options=[discord.SelectOption(label=o["label"][:100], value=str(i), description=o["note"])
-                     for i, o in enumerate(options[:25])])
-        self.add_item(ui.Label(text="아이템", component=self.item_select))
-        d = AUCTION_DEFAULTS
-        self.start_input = ui.TextInput(default=fmt_amount_kr(d["start_price"]),
-                                        placeholder="예: 100만, 1.5억, 3,750,000", max_length=30)
-        self.inc_input = ui.TextInput(default=fmt_amount_kr(d["increment"]), placeholder="예: 10만", max_length=30)
-        self.cd_input = ui.TextInput(default=str(int(d["countdown_sec"])), placeholder="예: 5", max_length=6)
-        self.add_item(ui.Label(text="시작가", component=self.start_input))
-        self.add_item(ui.Label(text="호가", description="입찰할 때마다 오르는 금액", component=self.inc_input))
-        self.add_item(ui.Label(text="카운트 (초)", description="이 시간 동안 입찰이 없으면 마감", component=self.cd_input))
-
-    async def on_submit(self, interaction: discord.Interaction):
-        start = parse_amount_kr(self.start_input.value)
-        inc = parse_amount_kr(self.inc_input.value)
-        cd_text = self.cd_input.value.strip().replace("초", "")
-        cd = int(cd_text) if cd_text.isdigit() else 0
-        err = None
-        if not self.item_select.values:
-            err = "❌ 경매할 아이템을 골라 주세요."
-        elif not start or not inc or start <= 0 or inc <= 0:
-            err = "❌ 시작가·호가를 확인해 주세요. 예: 100만, 1.5억, 3,750,000"
-        elif not 1 <= cd <= 3600:
-            err = "❌ 카운트는 1~3600초 사이 숫자로 입력해 주세요."
-        if err:
-            await interaction.response.send_message(err, ephemeral=True)
-            return
-        pick = self.options[int(self.item_select.values[0])]
-        await interaction.response.defer(ephemeral=True)
-        # 팝업을 연 사이 다른 사람이 같은 아이템 경매를 만들었는지 다시 확인
-        loot = (load_active_messages().get(str(self.message_id)) or {}).get("loot")
-        if loot is None:
-            loot, _, _ = await asyncio.to_thread(load_loot_from_excel, self.message_id)
-        still = {o["label"] for o in auction_options(loot or "", boss_auction.boards_for_source(self.message_id))}
-        if pick["label"] not in still:
-            await interaction.followup.send(f"⚠️ **{pick['label']}** 은(는) 이미 경매 중이거나 낙찰됐어요.",
-                                            ephemeral=True)
-            return
-        lot = make_lot(pick["item"], pick["unit"], start, inc, cd)
-        _, text, _ = await boss_auction.create_board(
-            [lot], boss_name=self.boss_name, boss_time=self.boss_time,
-            source_message_id=self.message_id, creator=interaction.user)
-        await interaction.followup.send(text, ephemeral=True)
-
-
 class ModalOpenView(discord.ui.View):
     """마감된 알림은 데이터 조회에 시간이 걸려 팝업을 바로 못 띄우므로 버튼 한 번 거친다."""
 
@@ -2248,8 +2190,16 @@ class AttendView(ui.View):
                     else "✅ 기록된 아이템이 모두 낙찰됐거나 경매 중이에요.")
             await self._reply(interaction, deferred, text)
             return
-        ctx = dict(message_id=msg_id, boss_name=self.boss_name, boss_time=self.boss_time, options=options)
-        await self._open_with_modal(interaction, deferred, lambda: AuctionCreateModal(**ctx), "경매 생성", "🔨")
+        async def _recheck():
+            # 팝업을 연 사이 다른 사람이 같은 아이템 경매를 만들었는지 다시 확인
+            loot = (load_active_messages().get(str(msg_id)) or {}).get("loot")
+            if loot is None:
+                loot, _, _ = await asyncio.to_thread(load_loot_from_excel, msg_id)
+            return {o["label"] for o in auction_options(loot or "", boss_auction.boards_for_source(msg_id))}
+
+        ctx = dict(title="🔨 경매 생성", options=options, defaults=AUCTION_DEFAULTS, boss_name=self.boss_name,
+                   boss_time=self.boss_time, source_message_id=msg_id, recheck=_recheck)
+        await self._open_with_modal(interaction, deferred, lambda: LotCreateModal(boss_auction, **ctx), "경매 생성", "🔨")
 
     @ui.button(label="파티 확인", style=discord.ButtonStyle.secondary, custom_id="boss_party", disabled=True)
     async def party_button(self, interaction: discord.Interaction, button: ui.Button):

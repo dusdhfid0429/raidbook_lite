@@ -340,38 +340,6 @@ class BossAuction:
                   if rec.get("type") == "board" and str(rec.get("source_message_id")) == str(source_message_id)]
         return sorted(boards, key=lambda b: b.get("created_at") or "")
 
-    async def relist_board(self, mid, creator, lots):
-        """🔁 끝난 진행판의 유찰 아이템을 (재입력한 시작가·호가·카운트로) 새 진행판에 올린다. 반환: (ok, 안내문)."""
-        async with self.lock:
-            board = self.store.get(mid)
-            if not board_can_relist(board):
-                return False, "다시 올릴 유찰 아이템이 없거나 이미 재경매를 올렸어요."
-            src = board.get("source_message_id")
-            if src and self.find_open_board(src):
-                return False, "⏳ 이 보스탐의 다른 경매가 아직 진행 중이에요. 끝난 뒤 눌러 주세요."
-            board["relisted_to"] = "pending"   # 연타 방지 — 게시 실패 시 되돌림
-            self.store.save(mid, board)
-        ok, text, msg = await self.create_board(
-            lots, boss_name=board.get("boss_name", ""), boss_time=board.get("boss_time", ""),
-            source_message_id=board.get("source_message_id"), creator=creator)
-        async with self.lock:
-            board = self.store.get(mid) or board
-            if ok and msg is not None:
-                board["relisted_to"] = str(msg.id)
-            else:
-                board.pop("relisted_to", None)
-            self.store.save(mid, board)
-        try:
-            ch = self.bot.get_channel(int(board["channel_id"])) or await self.bot.fetch_channel(int(board["channel_id"]))
-            old = await ch.fetch_message(int(mid))
-            await old.edit(view=self.view_for(board))
-        except Exception as e:
-            self.log.info(f"[재경매 원본 버튼 갱신 실패] {mid}: {type(e).__name__}: {e}")
-        if ok:
-            self.log.info(f"[진행판 재경매] {board.get('boss_name')} {board.get('boss_time')} | {len(lots)}건 "
-                          f"| {mid} → {msg.id if msg else '-'} | by {creator.display_name}")
-        return ok, text
-
     async def create_board(self, lots, *, boss_name, boss_time, source_message_id, creator):
         """진행판을 대기 상태로 게시 (관리자가 ▶️ 경매시작을 눌러야 아이템별로 시작). 반환: (ok, 안내문, 메시지)."""
         ch, err = await self._auction_channel()
@@ -871,16 +839,77 @@ def board_unsold_lots(board):
 
 
 def board_can_relist(board):
-    """🔁 유찰 재경매 가능 여부 — 진행판이 끝났고, 아직 재경매를 안 올렸고, 유찰 아이템이 있을 때."""
-    return (bool(board) and board.get("status") == "closed" and not board.get("relisted_to")
-            and bool(board_unsold_lots(board)))
+    """🔁 유찰 재경매 버튼 활성 여부 — 진행판이 끝났고 유찰 아이템이 있을 때."""
+    return bool(board) and board.get("status") == "closed" and bool(board_unsold_lots(board))
 
 
-def relist_text(board):
-    """재경매 입력창 기본값 — 유찰 아이템 한 줄씩 '이름 (순번) 시작가 호가 N초'.
-    순번을 이름에 남겨 두면 결과를 합칠 때 같은 아이템 결과를 겹쳐 쓴다."""
-    return "\n".join(f"{lot_label(lot)} {fmt_amount_kr(lot['start_price'])} {fmt_amount_kr(lot['increment'])} "
-                     f"{int(lot['countdown_sec'])}초" for lot in board_unsold_lots(board))
+def relist_options(board, boards):
+    """🔁 재경매 목록 — 이 진행판의 유찰 아이템 중 그 뒤에 다시 경매 중이거나 낙찰되지 않은 것.
+    boards: 같은 보스탐의 진행판들(등록 순). 반환: [{item, unit, label, note, lot}]."""
+    latest = latest_lots(boards)
+    out = []
+    for lot in board_unsold_lots(board):
+        label = lot_label(lot)
+        cur = latest.get(label, lot)
+        st = cur.get("status")
+        if st in ("pending", "active") or (st == "closed" and cur.get("bidder_id")):
+            continue
+        out.append({"item": lot["item"], "unit": lot.get("unit", ""), "label": label, "lot": lot,
+                    "note": f"유찰 — 지난 시작 {fmt_amount_kr(lot['start_price'])} / 호가 {fmt_amount_kr(lot['increment'])}"})
+    return out
+
+
+class LotCreateModal(ui.Modal):
+    """아이템 하나를 목록에서 고르고 시작가·호가·카운트를 칸마다 입력 → 경매장에 경매 메시지.
+    🔨 경매생성(보스 알림)과 🔁 유찰 재경매(끝난 진행판)가 같이 쓴다.
+    recheck: async () → 지금도 고를 수 있는 label 집합 (팝업을 연 사이 다른 사람이 올렸는지 확인)."""
+
+    def __init__(self, auction, *, title, options, defaults, boss_name, boss_time, source_message_id, recheck):
+        super().__init__(title=title)
+        self.auction = auction
+        self.options = options[:25]
+        self.boss_name = boss_name
+        self.boss_time = boss_time
+        self.source_message_id = source_message_id
+        self.recheck = recheck
+        self.item_select = ui.Select(
+            placeholder="경매할 아이템을 고르세요",
+            options=[discord.SelectOption(label=o["label"][:100], value=str(i), description=o["note"][:100])
+                     for i, o in enumerate(self.options)])
+        self.start_input = ui.TextInput(default=fmt_amount_kr(defaults["start_price"]),
+                                        placeholder="예: 100만, 1.5억, 3,750,000", max_length=30)
+        self.inc_input = ui.TextInput(default=fmt_amount_kr(defaults["increment"]), placeholder="예: 10만", max_length=30)
+        self.cd_input = ui.TextInput(default=str(int(defaults["countdown_sec"])), placeholder="예: 5", max_length=6)
+        self.add_item(ui.Label(text="아이템", component=self.item_select))
+        self.add_item(ui.Label(text="시작가", component=self.start_input))
+        self.add_item(ui.Label(text="호가", description="입찰할 때마다 오르는 금액", component=self.inc_input))
+        self.add_item(ui.Label(text="카운트 (초)", description="이 시간 동안 입찰이 없으면 마감", component=self.cd_input))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        start = parse_amount_kr(self.start_input.value)
+        inc = parse_amount_kr(self.inc_input.value)
+        cd_text = self.cd_input.value.strip().replace("초", "")
+        cd = int(cd_text) if cd_text.isdigit() else 0
+        err = None
+        if not self.item_select.values:
+            err = "❌ 경매할 아이템을 골라 주세요."
+        elif not start or not inc or start <= 0 or inc <= 0:
+            err = f"❌ 시작가·호가를 확인해 주세요. {AMOUNT_HINT}"
+        elif not 1 <= cd <= 3600:
+            err = "❌ 카운트는 1~3600초 사이 숫자로 입력해 주세요."
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+        pick = self.options[int(self.item_select.values[0])]
+        await interaction.response.defer(ephemeral=True)
+        if pick["label"] not in await self.recheck():
+            await interaction.followup.send(f"⚠️ **{pick['label']}** 은(는) 이미 경매 중이거나 낙찰됐어요.",
+                                            ephemeral=True)
+            return
+        _, text, _ = await self.auction.create_board(
+            [make_lot(pick["item"], pick["unit"], start, inc, cd)], boss_name=self.boss_name,
+            boss_time=self.boss_time, source_message_id=self.source_message_id, creator=interaction.user)
+        await interaction.followup.send(text, ephemeral=True)
 
 
 def merge_board_lots(boards):
@@ -1064,38 +1093,27 @@ class BoardView(ui.View):
         if not a.is_admin(interaction.user):
             await interaction.response.send_message("⛔ 관리자만 재경매를 올릴 수 있어요.", ephemeral=True)
             return
-        board = a.store.get(interaction.message.id)
-        if not board_can_relist(board):
-            await interaction.response.send_message("다시 올릴 유찰 아이템이 없거나 이미 재경매를 올렸어요.", ephemeral=True)
+        mid = interaction.message.id
+        board = a.store.get(mid)
+        src = (board or {}).get("source_message_id")
+
+        def _options():
+            fresh = a.store.get(mid) or board
+            return relist_options(fresh, a.boards_for_source(src) if src else [fresh])
+
+        options = _options() if board_can_relist(board) else []
+        if not options:
+            await interaction.response.send_message("다시 올릴 유찰 아이템이 없어요 (이미 재경매 중이거나 낙찰됨).",
+                                                    ephemeral=True)
             return
-        await interaction.response.send_modal(RelistModal(a, interaction.message.id, relist_text(board)))
 
+        async def _recheck():
+            return {o["label"] for o in _options()}
 
-class RelistModal(ui.Modal, title="🔁 유찰 재경매"):
-    """유찰 아이템의 시작가·호가·카운트를 새로 입력. 줄을 지우면 그 아이템은 다시 올리지 않는다."""
-
-    def __init__(self, auction: BossAuction, board_mid, prefill):
-        super().__init__()
-        self.auction = auction
-        self.board_mid = board_mid
-        self.lots_input = ui.TextInput(
-            label="재경매 아이템 (이름 시작가 호가 N초)",
-            style=discord.TextStyle.paragraph, max_length=1500, default=prefill[:1500],
-            placeholder="반지 (2/2) 20만 2만 5초\n숫자를 고치고, 안 올릴 줄은 지우세요",
-        )
-        self.add_item(self.lots_input)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            lots, _ = parse_board_lots(self.lots_input.value, self.auction.board_defaults)
-        except ValueError as e:
-            await interaction.response.send_message(
-                f"❌ {e}\n입력한 내용 (복사해서 다시 쓰세요):\n```\n{self.lots_input.value[:1500]}\n```",
-                ephemeral=True)
-            return
-        if not lots:
-            await interaction.response.send_message("❌ 다시 올릴 아이템을 한 줄 이상 남겨 주세요.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        _, text = await self.auction.relist_board(self.board_mid, interaction.user, lots)
-        await interaction.followup.send(text, ephemeral=True)
+        first = options[0]["lot"]
+        await interaction.response.send_modal(LotCreateModal(
+            a, title="🔁 유찰 재경매", options=options,
+            defaults={"start_price": first["start_price"], "increment": first["increment"],
+                      "countdown_sec": first["countdown_sec"]},
+            boss_name=board.get("boss_name", ""), boss_time=board.get("boss_time", ""),
+            source_message_id=src, recheck=_recheck))

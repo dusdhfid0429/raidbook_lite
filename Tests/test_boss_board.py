@@ -106,25 +106,21 @@ def _finish(board, winners):
         ba.board_after_close(board)
 
 
-def test_relist_and_merge():
-    lots, _ = ba.parse_board_lots("집행검\n반지 x2 30만 5만 10초", D)
-    first = {"lots": lots, "status": "active", "current": None, "created_at": "2026-10-28T10:00:00"}
-    _finish(first, [("1", "김철수", 1_100_000), ("2", "이영희", 300_000), None])
-    assert first["status"] == "closed"
+def test_relist_options():
+    # 3개 중 유찰·낙찰·유찰 → 재경매 목록은 1번·3번, 하나씩 다시 올리면 목록에서 빠짐
+    lots, _ = ba.parse_board_lots("집행검 50만 5만\n반지\n목걸이 30만 3만 7초", D)
+    first = {"lots": lots, "status": "active", "current": None, "source_message_id": "9", "created_at": "1"}
+    _finish(first, [None, ("1", "김", 100_000), None])
     assert ba.board_can_relist(first)
-    text = ba.relist_text(first)
-    assert text == "반지 (2/2) 30만 5만 10초"
-    # 시작가·호가·카운트를 고쳐 다시 올림 — 순번이 이름에 남아 결과가 겹쳐 쓰임
-    relots, _ = ba.parse_board_lots("반지 (2/2) 20만 2만 7초", D)
-    assert (ba.lot_label(relots[0]), relots[0]["start_price"], relots[0]["increment"], relots[0]["countdown_sec"]) \
-        == ("반지 (2/2)", 200_000, 20_000, 7)
-    second = {"lots": relots, "status": "active", "current": None, "created_at": "2026-10-28T10:05:00"}
-    first["relisted_to"] = "2"
-    assert not ba.board_can_relist(first)
-    _finish(second, [("3", "박민수", 200_000)])
-    merged = ba.lots_results_text(ba.merge_board_lots([first, second]))
-    assert merged == "집행검 김철수 110만 · 반지 (1/2) 이영희 30만 · 반지 (2/2) 박민수 20만"
-    assert not ba.board_can_relist(second)
+    opts = ba.relist_options(first, [first])
+    assert [o["label"] for o in opts] == ["집행검", "목걸이"]
+    assert opts[1]["lot"]["start_price"] == 300_000 and "30만" in opts[1]["note"]
+    again = {"lots": [ba.make_lot("집행검", "", 40_0000, 4_0000, 5)], "status": "active", "current": None,
+             "source_message_id": "9", "created_at": "2"}
+    assert [o["label"] for o in ba.relist_options(first, [first, again])] == ["목걸이"]
+    _finish(again, [("2", "이", 400_000)])
+    assert [o["label"] for o in ba.relist_options(first, [first, again])] == ["목걸이"]
+    assert ba.lots_results_text(ba.merge_board_lots([first, again])) == "집행검 이 40만 · 반지 김 10만 · 목걸이 유찰"
 
 
 def test_auction_options_from_loot():
