@@ -83,6 +83,19 @@ def _mirror(excel_path, *, system_sheets=None, loot_sheet=DEFAULT_LOOT_SHEET):
         return None
 
 
+def load_all_loot(excel_path, *, loot_sheet=DEFAULT_LOOT_SHEET):
+    """획득 아이템 시트 전체 {메시지ID: {boss_name, boss_time, loot_text, ...}} (JSON 미러 경유)."""
+    if not os.path.exists(excel_path):
+        return {}
+    m = _mirror(excel_path, loot_sheet=loot_sheet)
+    if m is None:
+        return {}
+    try:
+        return dict(m.ensure_fresh().get("loot", {}))
+    except Exception:
+        return {}
+
+
 def load_loot_record(excel_path, message_id, *, loot_sheet=DEFAULT_LOOT_SHEET):
     """Return (loot_text, editor, announcement_msg_id) for a boss message ID."""
     if not os.path.exists(excel_path):

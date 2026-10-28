@@ -180,6 +180,8 @@ class BossAuction:
         self.clock_offset = 0.0   # PC 시계 − Discord 시계 (초)
         # 경매 진행판 전체 종료 콜백 async (board) -> None (보스 알림에 결과 반영)
         self.on_board_finished = None
+        # 진행판 생성·아이템 마감 등 경매 대기 목록이 바뀔 때 호출 (동기 콜백, 예약만 해야 함)
+        self.on_change = None
         self.board_defaults = dict(DEFAULT_BOARD_DEFAULTS)   # 재경매 입력에서 숫자 생략 시
 
     def click_ts(self, interaction):
@@ -334,6 +336,13 @@ class BossAuction:
                 return mid
         return None
 
+    def notify_change(self):
+        if self.on_change:
+            try:
+                self.on_change()
+            except Exception as e:
+                self.log.info(f"[경매 변경 알림 실패] {type(e).__name__}: {e}")
+
     def boards_for_source(self, source_message_id):
         """같은 보스 알림에서 만든 진행판 전부 (등록 순). 재경매 결과 합치기용."""
         boards = [rec for rec in self.store.load().values()
@@ -360,6 +369,7 @@ class BossAuction:
             return False, (f"❌ 경매 채널 <#{self.channel_id}> 에 메시지를 보낼 권한이 없어요. "
                            f"봇에게 채널 보기·메시지 보내기·링크 첨부 권한을 주세요."), None
         self.store.save(msg.id, board)
+        self.notify_change()
         self.log.info(f"[진행판 등록] {boss_name} {boss_time} | {len(lots)}건 | 등록자 {creator.display_name} | msg {msg.id}")
         summary = "\n".join(f"· {lot_label(x)} — 시작 {fmt_amount_kr(x['start_price'])} / 호가 "
                             f"{fmt_amount_kr(x['increment'])} / {int(x['countdown_sec'])}초" for x in lots[:10])
@@ -438,6 +448,8 @@ class BossAuction:
                               reference=msg, mention_author=False)
         except Exception as e:
             self.log.info(f"[진행판 메시지 갱신 실패] {mid}: {type(e).__name__}: {e}")
+        if closed_lot or stop:
+            self.notify_change()
         if closed_lot:
             self.log.info(f"[진행판 마감] {lot_label(closed_lot)} | 낙찰 {closed_lot.get('bidder_name') or '유찰'} "
                           f"{int(closed_lot.get('current_price') or 0):,} | 입찰 {closed_lot.get('bid_count', 0)}회 | msg {mid}")
@@ -774,6 +786,57 @@ def auction_options(loot_text, boards):
         note = "유찰 — 다시 경매" if st in ("closed", "cancelled") else "경매 전"
         out.append({"item": item, "unit": unit, "label": label, "note": note})
     return out
+
+
+DISCORD_EPOCH_MS = 1420070400000
+
+
+def snowflake_time(message_id):
+    """Discord 메시지 ID → 생성 시각 (datetime, 로컬)."""
+    return datetime.fromtimestamp(((int(message_id) >> 22) + DISCORD_EPOCH_MS) / 1000)
+
+
+def pending_entries(loot_by_mid, boards_by_mid, excluded=None, *, since=None):
+    """경매 대기 목록 — 보스 알림별로 아직 경매 전이거나 유찰된 아이템.
+    loot_by_mid: {mid: {boss_name, boss_time, loot_text}}, boards_by_mid: {mid: [진행판...]},
+    excluded: {mid: [label...]} (목록에서 뺀 아이템). since 이전 알림은 제외. 최신 알림 먼저."""
+    excluded = excluded or {}
+    out = []
+    for mid, info in loot_by_mid.items():
+        if not str(mid).isdigit() or not (info.get("loot_text") or "").strip():
+            continue
+        when = snowflake_time(mid)
+        if since is not None and when < since:
+            continue
+        hide = set(excluded.get(str(mid)) or [])
+        opts = [o for o in auction_options(info.get("loot_text", ""), boards_by_mid.get(str(mid), []))
+                if o["label"] not in hide]
+        if opts:
+            out.append({"mid": str(mid), "boss_name": info.get("boss_name", ""),
+                        "boss_time": info.get("boss_time", ""), "when": when, "options": opts})
+    out.sort(key=lambda e: e["when"], reverse=True)
+    return out
+
+
+def build_pending_embed(entries, *, days, alert_link=None):
+    """📌 경매 대기 목록 embed — 이름·상태만 (금액 없음). alert_link: mid → 보스 알림 링크."""
+    embed = discord.Embed(title="📌 경매 대기 목록", color=0x5865f2)
+    lines = []
+    for e in entries:
+        head = f"**{e['boss_name']} {e['boss_time']}** · {e['when'].strftime('%m-%d')}"
+        if alert_link:
+            head += f" · [알림]({alert_link(e['mid'])})"
+        lines.append(head)
+        for o in e["options"]:
+            mark = "⚪" if o["note"].startswith("유찰") else "⏳"
+            lines.append(f"　{mark} {o['label']} — {o['note'].split(' —')[0]}")
+    desc = "\n".join(lines) or "경매를 기다리는 아이템이 없어요."
+    if len(desc) > 3900:
+        desc = desc[:3900] + "\n…"
+    embed.description = desc
+    count = sum(len(e["options"]) for e in entries)
+    embed.set_footer(text=f"{count}건 · 최근 {days}일 · 아래 목록에서 고르면 경매 생성 (관리자) · ⏳ 경매 전 ⚪ 유찰")
+    return embed
 
 
 def lot_label(lot):

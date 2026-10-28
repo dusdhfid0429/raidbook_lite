@@ -139,6 +139,29 @@ def test_auction_options_from_loot():
     assert ba.lots_results_text(ba.merge_board_lots([b1, b2, b3])) == "집행검 김 100 · 반지 (1/2) 유찰"
 
 
+def test_pending_entries_and_embed():
+    from datetime import datetime, timedelta
+    old_mid = str(((int((datetime.now() - timedelta(days=10)).timestamp() * 1000) - ba.DISCORD_EPOCH_MS) << 22))
+    new_mid = str(((int(datetime.now().timestamp() * 1000) - ba.DISCORD_EPOCH_MS) << 22))
+    assert abs((ba.snowflake_time(new_mid) - datetime.now()).total_seconds()) < 5
+    loot = {new_mid: {"boss_name": "드레이크", "boss_time": "18:00", "loot_text": "집행검, 반지 x2, 엘릭서"},
+            old_mid: {"boss_name": "카스파", "boss_time": "17:00", "loot_text": "목걸이"},
+            "1": {"boss_name": "빈칸", "boss_time": "", "loot_text": ""}}
+    sold = {"lots": [ba.make_lot("집행검", "", 100, 10, 5)], "status": "active", "current": None, "created_at": "1"}
+    _finish(sold, [("1", "김", 100)])
+    flop = {"lots": [ba.make_lot("반지", "1/2", 100, 10, 5)], "status": "active", "current": None, "created_at": "2"}
+    _finish(flop, [None])
+    entries = ba.pending_entries(loot, {new_mid: [sold, flop]}, {new_mid: ["엘릭서"]},
+                                 since=datetime.now() - timedelta(days=3))
+    assert len(entries) == 1
+    assert [(o["label"], o["note"]) for o in entries[0]["options"]] == [
+        ("반지 (1/2)", "유찰 — 다시 경매"), ("반지 (2/2)", "경매 전")]
+    e = ba.build_pending_embed(entries, days=3, alert_link=lambda m: f"https://x/{m}")
+    assert "드레이크 18:00" in e.description and "⚪ 반지 (1/2) — 유찰" in e.description
+    assert "김" not in e.description and "100" not in e.description   # 공개 목록엔 이름·상태만
+    assert "목걸이" not in e.description   # 기간 밖
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

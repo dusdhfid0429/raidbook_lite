@@ -36,6 +36,7 @@ import RaidBook_schedule as rb_schedule
 import RaidBook_attendance as rb_att
 from RaidBook_boss_data import (
     ensure_loot_sheet as _ensure_loot_sheet_core,
+    load_all_loot as _load_all_loot_core,
     load_attendees_by_message_id as _load_attendees_by_message_id_core,
     load_loot_record as _load_loot_record_core,
     load_loot_acquirers as _load_loot_acquirers_core,
@@ -49,6 +50,8 @@ from RaidBook_boss_auction import (
     BossAuction,
     LotCreateModal,
     auction_options,
+    build_pending_embed,
+    pending_entries,
     board_results_text,
     lots_results_text,
     merge_board_lots,
@@ -1576,8 +1579,9 @@ class LootRecordModal(ui.Modal, title="📦 획득 아이템"):
             await interaction.followup.send(loot_busy_message(), ephemeral=True)
             return
         if items and LOOT_AUCTION_BUTTON:
-            ack += "\n🔨 경매는 보스 알림의 **경매생성** 버튼에서 아이템을 골라 만들 수 있어요."
+            ack += "\n🔨 경매는 보스 알림의 **경매생성** 버튼이나 경매장의 📌 경매 대기 목록에서 만들 수 있어요."
         await interaction.followup.send(ack, ephemeral=True)
+        schedule_pending_refresh()
 
 
 class ModalOpenView(discord.ui.View):
@@ -1592,6 +1596,228 @@ class ModalOpenView(discord.ui.View):
     @ui.button(label="입력창 열기", style=discord.ButtonStyle.primary)
     async def open_btn(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(self.make_modal())
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  📌 경매 대기 목록 — 경매장 맨 아래에 항상 하나. 경매 전·유찰 아이템을 보스탐별로 모아 보여 주고
+#  목록에서 고르면 경매 생성 팝업. 새 메시지에 밀려 올라가면 지우고 맨 아래로 다시 올린다.
+#  상태: Data/auction_pending.json {message_id, excluded: {보스알림ID: [label...]}}
+# ══════════════════════════════════════════════════════════════════════════
+PENDING_STATE_PATH = os.path.join(DATA_DIR, "auction_pending.json")
+PENDING_DAYS = max(1, int(config.get("auction_pending_days", 3) or 3))
+PENDING_LIST_ENABLED = LOOT_AUCTION_BUTTON and bool(config.get("auction_pending_list", True))
+_pending_lock = asyncio.Lock()
+_pending_task = None
+_pending_cache = {}   # 보스알림ID → entry (팝업을 즉시 띄우기 위한 마지막 목록)
+
+
+def _load_pending_state():
+    try:
+        with open(PENDING_STATE_PATH, "r", encoding="utf-8") as f:
+            st = json.load(f)
+        return st if isinstance(st, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_pending_state(st):
+    write_json_atomic(PENDING_STATE_PATH, st, log)
+
+
+def _collect_pending_entries():
+    """Excel 획득 아이템 시트 + 진행 중 알림(JSON) 득템 → 경매 대기 목록 (스레드에서 실행)."""
+    loot = _load_all_loot_core(EXCEL_PATH, loot_sheet=LOOT_SHEET)
+    for mid, info in load_active_messages().items():
+        if info.get("loot"):
+            loot[str(mid)] = {"boss_name": info.get("boss_name", ""), "boss_time": info.get("boss_time", ""),
+                              "loot_text": info.get("loot", "")}
+    boards = {}
+    for rec in boss_auction.store.load().values():
+        if rec.get("type") == "board" and rec.get("source_message_id"):
+            boards.setdefault(str(rec["source_message_id"]), []).append(rec)
+    for lst in boards.values():
+        lst.sort(key=lambda b: b.get("created_at") or "")
+    since = datetime.now() - timedelta(days=PENDING_DAYS)
+    return pending_entries(loot, boards, _load_pending_state().get("excluded") or {}, since=since)
+
+
+def _alert_link(mid):
+    ch = bot.get_channel(ALERT_CHANNEL_ID)
+    gid = ch.guild.id if ch is not None and getattr(ch, "guild", None) else (
+        int(config.get("guild_id") or 0) or (bot.guilds[0].id if bot.guilds else 0))
+    return f"https://discord.com/channels/{gid}/{ALERT_CHANNEL_ID}/{mid}"
+
+
+class PendingListView(discord.ui.View):
+    """📌 경매 대기 목록 버튼 (persistent): 아이템 고르기(관리자) / 🔄 새로고침 / 🙈 목록에서 빼기(관리자)."""
+
+    def __init__(self, entries=None):
+        super().__init__(timeout=None)
+        opts = []
+        for e in entries or []:
+            for o in e["options"]:
+                if len(opts) >= 25:
+                    break
+                opts.append(discord.SelectOption(
+                    label=o["label"][:100], value=f"{e['mid']}|{o['label']}"[:100],
+                    description=f"{e['boss_name']} {e['boss_time']} · {e['when'].strftime('%m-%d')} · "
+                                f"{o['note'].split(' —')[0]}"[:100]))
+        sel = self.pick_select
+        if opts:
+            sel.options = opts
+            sel.placeholder = "🔨 경매할 아이템 고르기 (관리자)"
+            sel.disabled = False
+        else:
+            sel.options = [discord.SelectOption(label="대기 중인 아이템 없음", value="none")]
+            sel.placeholder = "대기 중인 아이템 없음"
+            sel.disabled = True
+
+    @ui.select(custom_id="boss_pending_pick", placeholder="🔨 경매할 아이템 고르기 (관리자)",
+               options=[discord.SelectOption(label="-", value="none")], row=0)
+    async def pick_select(self, interaction: discord.Interaction, select: ui.Select):
+        if not _is_bot_admin(interaction.user):
+            await interaction.response.send_message("⛔ 목록에서 경매 생성은 관리자만 할 수 있어요. "
+                                                    "보스 알림의 🔨 경매생성 버튼을 써 주세요.", ephemeral=True)
+            return
+        value = (select.values or ["none"])[0]
+        mid, _, label = value.partition("|")
+        entry = _pending_cache.get(mid)
+        opt = next((o for o in (entry or {}).get("options", []) if o["label"] == label), None)
+        if entry is None or opt is None:
+            await interaction.response.send_message("목록이 바뀌었어요. 🔄 새로고침 후 다시 골라 주세요.", ephemeral=True)
+            schedule_pending_refresh()
+            return
+
+        async def _recheck():
+            entries = await asyncio.to_thread(_collect_pending_entries)
+            return {o["label"] for e in entries if e["mid"] == mid for o in e["options"]}
+
+        await interaction.response.send_modal(LotCreateModal(
+            boss_auction, title="🔨 경매 생성", options=[opt], defaults=AUCTION_DEFAULTS,
+            boss_name=entry["boss_name"], boss_time=entry["boss_time"], source_message_id=mid, recheck=_recheck))
+
+    @ui.button(label="새로고침", emoji="🔄", style=discord.ButtonStyle.secondary, custom_id="boss_pending_refresh", row=1)
+    async def refresh_btn(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        await refresh_pending_list()
+        await interaction.followup.send("🔄 목록을 새로 고쳤어요.", ephemeral=True)
+
+    @ui.button(label="목록에서 빼기", emoji="🙈", style=discord.ButtonStyle.secondary, custom_id="boss_pending_hide", row=1)
+    async def hide_btn(self, interaction: discord.Interaction, button: ui.Button):
+        if not _is_bot_admin(interaction.user):
+            await interaction.response.send_message("⛔ 관리자만 목록을 정리할 수 있어요.", ephemeral=True)
+            return
+        opts = [(e, o) for e in _pending_cache.values() for o in e["options"]][:25]
+        if not opts:
+            await interaction.response.send_message("뺄 아이템이 없어요.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "경매하지 않을 아이템을 고르세요 (기록은 그대로 남아요).", view=_PendingHideView(opts), ephemeral=True)
+
+
+class _PendingHideView(discord.ui.View):
+    def __init__(self, pairs):
+        super().__init__(timeout=300)
+        self.sel = ui.Select(placeholder="목록에서 뺄 아이템 (여러 개 선택 가능)", min_values=1,
+                             max_values=len(pairs), options=[
+            discord.SelectOption(label=o["label"][:100], value=f"{e['mid']}|{o['label']}"[:100],
+                                 description=f"{e['boss_name']} {e['boss_time']} · {e['when'].strftime('%m-%d')}"[:100])
+            for e, o in pairs])
+        self.sel.callback = self._chosen
+        self.add_item(self.sel)
+
+    async def _chosen(self, interaction: discord.Interaction):
+        st = _load_pending_state()
+        excluded = st.setdefault("excluded", {})
+        for v in self.sel.values:
+            mid, _, label = v.partition("|")
+            lst = excluded.setdefault(mid, [])
+            if label not in lst:
+                lst.append(label)
+        _save_pending_state(st)
+        await interaction.response.edit_message(content=f"🙈 {len(self.sel.values)}건을 목록에서 뺐어요.", view=None)
+        log.info(f"[경매 대기 목록 제외] {interaction.user.display_name} | {', '.join(self.sel.values)[:200]}")
+        await refresh_pending_list()
+
+
+async def refresh_pending_list():
+    """목록을 다시 계산해 경매장 맨 아래 메시지를 갱신 (밀려 올라갔으면 지우고 다시 게시)."""
+    global _pending_cache
+    if not PENDING_LIST_ENABLED or not AUCTION_CHANNEL_ID:
+        return
+    async with _pending_lock:
+        try:
+            entries = await asyncio.to_thread(_collect_pending_entries)
+        except Exception as e:
+            log.info(f"[경매 대기 목록 계산 실패] {type(e).__name__}: {e}")
+            return
+        _pending_cache = {e["mid"]: e for e in entries}
+        embed = build_pending_embed(entries, days=PENDING_DAYS, alert_link=_alert_link)
+        view = PendingListView(entries)
+        try:
+            ch = bot.get_channel(AUCTION_CHANNEL_ID) or await bot.fetch_channel(AUCTION_CHANNEL_ID)
+        except Exception as e:
+            log.info(f"[경매 대기 목록] 경매 채널 조회 실패: {type(e).__name__}: {e}")
+            return
+        st = _load_pending_state()
+        old_id = st.get("message_id")
+        last_id = None
+        try:
+            async for m in ch.history(limit=1):
+                last_id = m.id
+        except Exception:
+            pass
+        if old_id and last_id and int(old_id) == last_id:
+            try:
+                msg = await ch.fetch_message(int(old_id))
+                await msg.edit(embed=embed, view=view)
+                return
+            except discord.NotFound:
+                pass
+            except Exception as e:
+                log.info(f"[경매 대기 목록 수정 실패] {type(e).__name__}: {e}")
+                return
+        if old_id:
+            try:
+                await (await ch.fetch_message(int(old_id))).delete()   # 봇이 올린 목록 메시지만 지움
+            except Exception:
+                pass
+        try:
+            msg = await ch.send(embed=embed, view=view)
+        except Exception as e:
+            log.info(f"[경매 대기 목록 게시 실패] {type(e).__name__}: {e}")
+            return
+        try:
+            await msg.pin(reason="RaidBook 경매 대기 목록")
+        except Exception:
+            pass
+        st["message_id"] = msg.id
+        _save_pending_state(st)
+
+
+def schedule_pending_refresh(delay=3.0):
+    """연속 변경을 묶어 몇 초 뒤 한 번만 갱신."""
+    global _pending_task
+    if not PENDING_LIST_ENABLED:
+        return
+    if _pending_task and not _pending_task.done():
+        _pending_task.cancel()
+
+    async def _run():
+        try:
+            await asyncio.sleep(delay)
+            await refresh_pending_list()
+        except asyncio.CancelledError:
+            pass
+
+    _pending_task = asyncio.ensure_future(_run())
+
+
+async def _pending_refresh_loop():
+    """날짜가 지나 목록에서 빠질 알림 등 반영 — 10분마다."""
+    while True:
+        await asyncio.sleep(600)
+        await refresh_pending_list()
 
 
 async def _apply_board_results(board):
@@ -2777,6 +3003,7 @@ async def _close_sweep_loop():
 
 
 _close_sweep_task = None
+_pending_loop_task = None
 
 
 async def schedule_boss(boss_name, alert_time, interval_hours):
@@ -2854,6 +3081,7 @@ boss_auction = BossAuction(bot, channel_id=AUCTION_CHANNEL_ID, data_dir=DATA_DIR
                            is_admin=_is_bot_admin, logger=log, currency=AUCTION_CURRENCY,
                            get_attendees=_boss_attendees_for)
 boss_auction.on_board_finished = _apply_board_results
+boss_auction.on_change = lambda: schedule_pending_refresh()
 boss_auction.board_defaults = dict(AUCTION_DEFAULTS)
 
 
@@ -5048,10 +5276,15 @@ async def initialize_on_ready():
     bot.add_view(LootAuctionView())  # 전리품 공지 경매시작 버튼 재시작 복구
     bot.add_view(AuctionView(boss_auction))  # 경매 메시지 버튼 재시작 복구
     bot.add_view(BoardView(boss_auction))  # 경매 진행판 버튼 재시작 복구
+    bot.add_view(PendingListView())  # 📌 경매 대기 목록 버튼 재시작 복구
     await boss_auction.restore()
     global _close_sweep_task
     if _close_sweep_task is None or _close_sweep_task.done():
         _close_sweep_task = asyncio.ensure_future(_close_sweep_loop())
+    global _pending_loop_task
+    if PENDING_LIST_ENABLED and (_pending_loop_task is None or _pending_loop_task.done()):
+        _pending_loop_task = asyncio.ensure_future(_pending_refresh_loop())
+        schedule_pending_refresh(10.0)
     await _sync_slash_commands()
     now = datetime.now()
     channel = bot.get_channel(COMMAND_CHANNEL_ID)
