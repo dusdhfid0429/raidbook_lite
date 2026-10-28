@@ -757,6 +757,57 @@ def parse_board_lots(text, defaults):
     return lots, names
 
 
+def make_lot(item, unit, start_price, increment, countdown_sec):
+    return {
+        "item": item, "unit": unit or "",
+        "start_price": int(start_price), "increment": int(increment), "countdown_sec": int(countdown_sec),
+        "current_price": 0, "bidder_id": None, "bidder_name": "", "bid_count": 0,
+        "last_bid_at": None, "started_ts": None, "status": "pending",
+    }
+
+
+def expand_loot_units(loot_text):
+    """득템 기록 '집행검, 반지 x2' → [('집행검',''), ('반지','1/2'), ('반지','2/2')]."""
+    units = []
+    for raw in re.split(r"[,\n]+", str(loot_text or "")):
+        name = raw.strip()
+        if not name:
+            continue
+        qty = 1
+        m = re.fullmatch(r"(.*?)\s*(?:[xX×*](\d+)|(\d+)개)", name)
+        if m and m.group(1).strip():
+            name, qty = m.group(1).strip(), int(m.group(2) or m.group(3))
+        qty = max(1, min(qty, MAX_LOT_QTY))
+        for i in range(qty):
+            units.append((name, f"{i + 1}/{qty}" if qty > 1 else ""))
+    return units
+
+
+def latest_lots(boards):
+    """같은 보스탐 진행판들(등록 순)에서 아이템별 가장 최근 lot."""
+    out = {}
+    for board in boards:
+        for lot in board.get("lots") or []:
+            out[lot_label(lot)] = lot
+    return out
+
+
+def auction_options(loot_text, boards):
+    """🔨 경매생성 목록 — 득템 기록 중 아직 경매 안 했거나 유찰된 아이템.
+    낙찰됐거나 진행판에서 대기·진행 중인 아이템은 뺀다. 반환: [{item, unit, label, note}]."""
+    latest = latest_lots(boards)
+    out = []
+    for item, unit in expand_loot_units(loot_text):
+        label = f"{item} ({unit})" if unit else item
+        lot = latest.get(label)
+        st = (lot or {}).get("status")
+        if st in ("pending", "active") or (st == "closed" and lot.get("bidder_id")):
+            continue
+        note = "유찰 — 다시 경매" if st in ("closed", "cancelled") else "경매 전"
+        out.append({"item": item, "unit": unit, "label": label, "note": note})
+    return out
+
+
 def lot_label(lot):
     return f"{lot['item']} ({lot['unit']})" if lot.get("unit") else lot["item"]
 
@@ -867,7 +918,7 @@ def build_board_embed(board, currency="", now=None):
     closed = board.get("status") == "closed"
     head = f"{board.get('boss_name', '')} {board.get('boss_time', '')}".strip()
     embed = discord.Embed(
-        title=f"🏁 경매 완료 — {head}" if closed else f"🔨 경매 진행판 — {head}",
+        title=f"🏁 경매 완료 — {head}" if closed else (f"🔨 경매 진행판 — {head}" if len(lots) > 1 else f"🔨 경매 — {head}"),
         color=0x1d9e75 if closed else 0xf0b232)
     lines = []
     for lot in lots:

@@ -127,6 +127,22 @@ def test_relist_and_merge():
     assert not ba.board_can_relist(second)
 
 
+def test_auction_options_from_loot():
+    assert ba.expand_loot_units("집행검, 반지 x2\n엘릭서 3개") == [
+        ("집행검", ""), ("반지", "1/2"), ("반지", "2/2"), ("엘릭서", "1/3"), ("엘릭서", "2/3"), ("엘릭서", "3/3")]
+    loot = "집행검, 반지 x2, 목걸이"
+    assert [o["label"] for o in ba.auction_options(loot, [])] == ["집행검", "반지 (1/2)", "반지 (2/2)", "목걸이"]
+    # 집행검 낙찰, 반지(1/2) 유찰, 반지(2/2) 대기 중 → 목록: 반지(1/2)(유찰), 목걸이
+    b1 = {"lots": [ba.make_lot("집행검", "", 100, 10, 5)], "status": "active", "current": None, "created_at": "1"}
+    _finish(b1, [("1", "김", 100)])
+    b2 = {"lots": [ba.make_lot("반지", "1/2", 100, 10, 5)], "status": "active", "current": None, "created_at": "2"}
+    _finish(b2, [None])
+    b3 = {"lots": [ba.make_lot("반지", "2/2", 100, 10, 5)], "status": "active", "current": None, "created_at": "3"}
+    opts = ba.auction_options(loot, [b1, b2, b3])
+    assert [(o["label"], o["note"]) for o in opts] == [("반지 (1/2)", "유찰 — 다시 경매"), ("목걸이", "경매 전")]
+    assert ba.lots_results_text(ba.merge_board_lots([b1, b2, b3])) == "집행검 김 100 · 반지 (1/2) 유찰"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
