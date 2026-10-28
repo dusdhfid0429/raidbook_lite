@@ -393,7 +393,12 @@ class BossAuction:
                            f"봇에게 채널 보기·메시지 보내기·링크 첨부 권한을 주세요."), None
         self.store.save(msg.id, board)
         self.log.info(f"[진행판 등록] {boss_name} {boss_time} | {len(lots)}건 | 등록자 {creator.display_name} | msg {msg.id}")
-        return True, f"🔨 경매 {len(lots)}건 진행판 → {msg.jump_url}\n관리자가 ▶️ 경매시작을 누르면 아이템별로 시작돼요.", msg
+        summary = "\n".join(f"· {lot_label(x)} — 시작 {fmt_amount_kr(x['start_price'])} / 호가 "
+                            f"{fmt_amount_kr(x['increment'])} / {int(x['countdown_sec'])}초" for x in lots[:10])
+        if len(lots) > 10:
+            summary += f"\n· … 외 {len(lots) - 10}건"
+        return True, (f"🔨 경매 {len(lots)}건 진행판 → {msg.jump_url}\n{summary}\n"
+                      f"관리자가 ▶️ 경매시작을 누르면 아이템별로 시작돼요."), msg
 
     def _schedule_board(self, mid, board):
         lot = board_current(board)
@@ -639,6 +644,9 @@ def parse_board_defaults(text, fallback=None):
         if m:
             out["countdown_sec"] = int(m.group(1))
             continue
+        if len(amounts) >= 2 and _plain_int(tok) is not None and _plain_int(tok) <= 3600:
+            out["countdown_sec"] = _plain_int(tok)   # '10만 1만 5' — 초 빠진 카운트
+            continue
         amt = parse_amount_kr(tok)
         if amt:
             amounts.append(amt)
@@ -653,31 +661,63 @@ def format_board_defaults(d):
     return f"{fmt_amount_kr(d['start_price'])} {fmt_amount_kr(d['increment'])} {int(d['countdown_sec'])}초"
 
 
+def _plain_int(token):
+    """단위 없는 정수 토큰이면 값, 아니면 None ('5', '1,000' → 정수 / '5만' → None)."""
+    t = token.replace(",", "")
+    return int(t) if t.isdigit() else None
+
+
 def parse_lot_line(line, defaults):
-    """'반지 x2 30만 5만 10초' → (이름, 수량, 시작가, 호가, 카운트). 해석 불가 시 ValueError."""
-    tokens = str(line or "").replace(" / ", " ").replace("/", " ").split()
-    qty, countdown, amounts = 1, None, []
+    """'반지 x2 30만 5만 10초' → (이름, 수량, 시작가, 호가, 카운트). 해석 불가 시 ValueError.
+
+    줄 끝의 숫자들을 순서대로 시작가 → 호가 → 카운트로 본다. '초'가 빠진 카운트(`100만 10만 5`),
+    쉼표·슬래시 구분(`100만,10만,5초`), '시작가/호가/카운트' 같은 말머리도 받아들인다.
+    이름 끝의 작은 숫자 하나(`룬 3`)는 금액이 아니라 이름으로 남긴다."""
+    text = str(line or "")
+    text = re.sub(r"(시작가|시작|호가|카운트)\s*[:=]?", " ", text)
+    text = text.replace("/", " ")
+    text = re.sub(r",(?!\d{3}(?!\d))", " ", text)   # 1,000,000 의 천 단위 쉼표는 남김
+    tokens = text.split()
+    run = []   # 줄 끝 숫자 토큰 (뒤에서부터)
     while len(tokens) > 1:
         t = tokens[-1]
+        if re.fullmatch(r"\d+초", t) or re.fullmatch(r"(?:[xX×*]\d+|\d+개)", t) or (parse_amount_kr(t) or 0) > 0:
+            run.insert(0, tokens.pop())
+        else:
+            break
+    qty, countdown, amts = 1, None, []
+    for t in run:
         m_sec = re.fullmatch(r"(\d+)초", t)
         m_qty = re.fullmatch(r"(?:[xX×*](\d+)|(\d+)개)", t)
         if m_sec and countdown is None:
             countdown = int(m_sec.group(1))
         elif m_qty and qty == 1:
             qty = int(m_qty.group(1) or m_qty.group(2))
-        elif len(amounts) < 2 and _amount_token(t) is not None:
-            amounts.insert(0, _amount_token(t))
         else:
-            break
-        tokens.pop()
-    name = " ".join(tokens).strip()
+            amts.append(t)
+    # '초' 없는 카운트: 숫자가 셋이거나, 금액 뒤에 붙은 작은 정수면 마지막을 카운트로
+    if countdown is None and len(amts) >= 2:
+        last = _plain_int(amts[-1])
+        prev = parse_amount_kr(amts[-2]) or 0
+        if last is not None and last <= 3600 and (len(amts) >= 3 or (last < 1000 and prev >= 1000)):
+            countdown = last
+            amts.pop()
+    back = []
+    while len(amts) > 2:
+        back.append(amts.pop(0))
+    # 이름 끝 작은 숫자 ('룬 3', '룬 3 10만') — 금액 하나뿐이거나 뒤에 더 큰 금액이 있으면 이름으로
+    if amts and _plain_int(amts[0]) is not None and _plain_int(amts[0]) < 1000:
+        if len(amts) == 1 or (parse_amount_kr(amts[1]) or 0) >= 1000 and _plain_int(amts[1]) is None:
+            back.append(amts.pop(0))
+    name = " ".join(tokens + back).strip()
     m = re.fullmatch(r"(.*?)\s*[xX×*](\d+)", name)
     if m and m.group(1) and qty == 1:
         name, qty = m.group(1).strip(), int(m.group(2))
     if not name:
         raise ValueError(f"아이템 이름이 없어요: `{line}`")
-    start = amounts[0] if amounts else int(defaults["start_price"])
-    inc = amounts[1] if len(amounts) > 1 else int(defaults["increment"])
+    values = [parse_amount_kr(t) for t in amts]
+    start = values[0] if values else int(defaults["start_price"])
+    inc = values[1] if len(values) > 1 else int(defaults["increment"])
     cd = countdown if countdown is not None else int(defaults["countdown_sec"])
     if not 1 <= qty <= MAX_LOT_QTY:
         raise ValueError(f"수량은 1~{MAX_LOT_QTY}개로 적어 주세요: `{line}`")

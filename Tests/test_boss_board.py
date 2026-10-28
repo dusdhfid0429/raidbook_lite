@@ -21,6 +21,20 @@ def test_parse_line_full_and_defaults():
     assert ba.parse_lot_line("드래곤 슬레이어 1.5억 1000만", D) == ("드래곤 슬레이어", 1, 150_000_000, 10_000_000, 5)
 
 
+
+def test_parse_line_loose_formats():
+    # '초' 빠진 카운트, 쉼표·슬래시 구분, 말머리, 천 단위 쉼표
+    want = ("집행검", 1, 1_000_000, 100_000, 7)
+    for line in ("집행검 100만 10만 7", "집행검 100만,10만,7초", "집행검 100만, 10만, 7",
+                 "집행검 100만/10만/7초", "집행검 1,000,000 100,000 7",
+                 "집행검 시작가 100만 호가 10만 카운트 7", "집행검 시작가:100만 호가:10만 7초"):
+        assert ba.parse_lot_line(line, D) == want, line
+    assert ba.parse_lot_line("집행검 100 10 7", D) == ("집행검", 1, 100, 10, 7)
+    assert ba.parse_lot_line("집행검 100만 7", D) == ("집행검", 1, 1_000_000, 10_000, 7)
+    assert ba.parse_lot_line("룬 3 20만 2만 7초", D) == ("룬 3", 1, 200_000, 20_000, 7)
+    assert ba.parse_board_defaults("20만 2만 7", D) == {"start_price": 200_000, "increment": 20_000, "countdown_sec": 7}
+
+
 def test_parse_line_errors():
     for bad in ("반지 x50", "반지 0초"):
         try:
