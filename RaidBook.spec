@@ -17,7 +17,8 @@ def build(script, name, hidden):
     a = Analysis([script], pathex=[os.path.abspath(SPECPATH)], datas=DATAS,
                  hiddenimports=hidden, excludes=EXCLUDES, noarchive=False)
     pyz = PYZ(a.pure, a.zipped_data)
-    return EXE(pyz, a.scripts, a.binaries, a.zipfiles, a.datas, [], name=name,
+    # 설치판 부트로더는 PYTHONUTF8 환경변수를 무시하므로 UTF-8 모드를 빌드 옵션으로 고정 (로그 한글 깨짐 방지)
+    return EXE(pyz, a.scripts, a.binaries, a.zipfiles, a.datas, [('X utf8_mode=1', None, 'OPTION')], name=name,
                debug=False, strip=False, upx=False, console=False,
                icon=ICON, version_file=VERSION_FILE)
 

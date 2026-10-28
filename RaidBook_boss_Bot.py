@@ -217,6 +217,14 @@ def apply_user_id_mapping(wb) -> int:
 
 
 # === 로그 설정 ===
+# 설치판(PyInstaller)은 PYTHONIOENCODING/PYTHONUTF8 환경변수를 무시해 stdout이 CP949로 나가고,
+# Watchdog이 UTF-8로 읽으면서 로그 창 한글이 깨진다 → 출력 스트림을 직접 UTF-8로 고정.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 log = logging.getLogger("BossBot")
 log.setLevel(logging.INFO)
 _formatter = logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
