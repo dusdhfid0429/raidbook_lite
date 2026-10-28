@@ -78,6 +78,12 @@ def test_lookup_single_playlist_search():
             assert "Video unavailable" in str(e)
 
 
+def test_voice_bitrate():
+    assert rbm.voice_bitrate_kbps(64000) == 128
+    assert rbm.voice_bitrate_kbps(384000) == 384
+    assert rbm.voice_bitrate_kbps(96000, 256) == 256
+
+
 def test_pipe_args_stream_to_stdout():
     args = rbm.ytdlp_pipe_args("https://youtu.be/x", "")
     assert args[-3:] == ["-o", "-", "https://youtu.be/x"] and "--no-playlist" in args

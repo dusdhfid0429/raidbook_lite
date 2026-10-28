@@ -23,7 +23,15 @@ DENO_URL = "https://github.com/denoland/deno/releases/latest/download/deno-x86_6
 
 # 재생 중 스트림이 끊겨도 ffmpeg가 다시 연결하도록
 FFMPEG_BEFORE_OPTIONS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin"
-FFMPEG_OPTIONS = "-vn"
+FFMPEG_OPTIONS = "-vn -ar 48000 -ac 2"   # Discord 음성 규격(48kHz 스테레오)으로 바로 맞춤
+
+
+def voice_bitrate_kbps(channel_bitrate_bps: int, override_kbps: int = 0) -> int:
+    """Opus 인코딩 비트레이트(kbps). 기본은 음성채널 설정값(서버 부스트 시 최대 384)과 128 중 큰 값, 512 상한."""
+    if override_kbps:
+        return max(32, min(512, int(override_kbps)))
+    ch = int(channel_bitrate_bps or 0) // 1000
+    return max(128, min(512, ch))
 
 _URL_RE = re.compile(r"^https?://", re.I)
 _YT_HOST_RE = re.compile(r"^https?://([a-z0-9-]+\.)*(youtube\.com|youtu\.be|youtube-nocookie\.com)/", re.I)

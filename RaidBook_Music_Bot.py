@@ -117,6 +117,8 @@ MAX_PLAYLIST = max(1, int(config.get("max_playlist", 30) or 30))
 IDLE_DISCONNECT = max(30, int(config.get("idle_disconnect_seconds", 300) or 300))
 YOUTUBE_ONLY = bool(config.get("youtube_only", True))
 AUTO_UPDATE = bool(config.get("auto_update_ytdlp", True))
+# 0이면 음성채널 비트레이트에 맞춤 (최소 128kbps)
+BITRATE_KBPS = int(config.get("bitrate_kbps", 0) or 0)
 
 intents = discord.Intents.default()   # guilds + voice_states 만 필요 (권한 인텐트 불필요)
 bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents, help_command=None)
@@ -355,8 +357,10 @@ async def play_next(p: GuildPlayer):
                 asyncio.run_coroutine_threadsafe(_report_failed(p, track, src.last_error or str(err)), bot.loop)
             asyncio.run_coroutine_threadsafe(play_next(p), bot.loop)
 
-        vc.play(source, after=_after)
-        log.info(f"[재생] {track.title} ({track.duration_text}) — {track.requester_name}")
+        # 음악용 Opus 설정: 비트레이트를 채널에 맞춰 올리고, 손실 보정(FEC)에 쓰던 비트를 음질에 쓴다
+        kbps = rbm.voice_bitrate_kbps(getattr(vc.channel, "bitrate", 0), BITRATE_KBPS)
+        vc.play(source, after=_after, bitrate=kbps, signal_type="music", fec=False, expected_packet_loss=0.01)
+        log.info(f"[재생] {track.title} ({track.duration_text}) — {track.requester_name} | {kbps}kbps")
     await _post_np(p)
 
 
