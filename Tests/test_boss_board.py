@@ -81,6 +81,38 @@ def test_board_embed_builds():
     assert "⏱️ 마감" in [f.name for f in e.fields]
 
 
+def _finish(board, winners):
+    """lots 를 순서대로 시작·마감. winners: 순번 → (uid, 이름, 가격) 또는 None(유찰)."""
+    for i, w in enumerate(winners):
+        ba.board_start_next(board, 1000 + i)
+        lot = ba.board_current(board)
+        if w:
+            lot.update(bidder_id=w[0], bidder_name=w[1], current_price=w[2], bid_count=1)
+        ba.board_close_current(board)
+        ba.board_after_close(board)
+
+
+def test_relist_and_merge():
+    lots, _ = ba.parse_board_lots("집행검\n반지 x2 30만 5만 10초", D)
+    first = {"lots": lots, "status": "active", "current": None, "created_at": "2026-10-28T10:00:00"}
+    _finish(first, [("1", "김철수", 1_100_000), ("2", "이영희", 300_000), None])
+    assert first["status"] == "closed"
+    assert ba.board_can_relist(first)
+    text = ba.relist_text(first)
+    assert text == "반지 (2/2) 30만 5만 10초"
+    # 시작가·호가·카운트를 고쳐 다시 올림 — 순번이 이름에 남아 결과가 겹쳐 쓰임
+    relots, _ = ba.parse_board_lots("반지 (2/2) 20만 2만 7초", D)
+    assert (ba.lot_label(relots[0]), relots[0]["start_price"], relots[0]["increment"], relots[0]["countdown_sec"]) \
+        == ("반지 (2/2)", 200_000, 20_000, 7)
+    second = {"lots": relots, "status": "active", "current": None, "created_at": "2026-10-28T10:05:00"}
+    first["relisted_to"] = "2"
+    assert not ba.board_can_relist(first)
+    _finish(second, [("3", "박민수", 200_000)])
+    merged = ba.lots_results_text(ba.merge_board_lots([first, second]))
+    assert merged == "집행검 김철수 110만 · 반지 (1/2) 이영희 30만 · 반지 (2/2) 박민수 20만"
+    assert not ba.board_can_relist(second)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

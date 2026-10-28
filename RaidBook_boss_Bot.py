@@ -49,6 +49,8 @@ from RaidBook_boss_auction import (
     BossAuction,
     board_results_text,
     format_board_defaults,
+    lots_results_text,
+    merge_board_lots,
     parse_board_defaults,
     parse_board_lots,
 )
@@ -1577,7 +1579,8 @@ class LootBoardModal(ui.Modal, title="💎 득템 · 경매"):
             await interaction.response.send_message(
                 "⏳ 이 보스탐의 경매가 아직 진행 중이에요. 끝난 뒤 다시 등록해 주세요.", ephemeral=True)
             return
-        items = auction_names + _split_record_items(self.record_input.value)
+        # 기록 칸은 기존 득템으로 미리 채워지므로, 경매 칸에 다시 적은 아이템은 중복 기록하지 않는다
+        items = auction_names + [x for x in _split_record_items(self.record_input.value) if x not in auction_names]
         if not items:
             await interaction.response.send_message("❌ 아이템을 하나 이상 적어 주세요.", ephemeral=True)
             return
@@ -1613,7 +1616,9 @@ class LootBoardOpenView(discord.ui.View):
 async def _apply_board_results(board):
     """진행판이 끝나면 결과를 원본 보스 알림(embed)과 득템 기록(Excel 획득자 칸)에 남긴다."""
     mid = board.get("source_message_id")
-    results = board_results_text(board)
+    # 재경매로 진행판이 여러 개면 아이템별 최신 결과로 합친다 (앞 낙찰 결과를 덮어쓰지 않도록)
+    results = (lots_results_text(merge_board_lots(boss_auction.boards_for_source(mid)))
+               if mid else board_results_text(board))
     if not mid or not results:
         return
     info = load_active_messages().get(str(mid))
@@ -2757,6 +2762,7 @@ boss_auction = BossAuction(bot, channel_id=AUCTION_CHANNEL_ID, data_dir=DATA_DIR
                            is_admin=_is_bot_admin, logger=log, currency=AUCTION_CURRENCY,
                            get_attendees=_boss_attendees_for)
 boss_auction.on_board_finished = _apply_board_results
+boss_auction.board_defaults = dict(AUCTION_DEFAULTS)
 
 
 @bot.check
