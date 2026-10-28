@@ -275,6 +275,14 @@ async def stream_url(cmd: list, page_url: str, deno_path: str = "") -> str:
     return urls[0]
 
 
+def ytdlp_pipe_args(page_url: str, deno_path: str = "") -> list:
+    """yt-dlp가 직접 받아 표준출력으로 흘려보내는 인자.
+    스트림 주소를 ffmpeg에 넘기면 유튜브가 403으로 막는 경우가 많아(클라이언트 헤더·토큰 불일치),
+    받기는 yt-dlp가 하고 ffmpeg는 파이프로 디코딩만 한다."""
+    return ytdlp_base_args(deno_path) + ["-f", "bestaudio/best", "--no-playlist", "--no-part", "-q",
+                                         "-o", "-", page_url]
+
+
 async def self_update(cmd: list) -> str:
     """단독 실행 파일일 때만 yt-dlp -U. 결과 한 줄."""
     if len(cmd) != 1:

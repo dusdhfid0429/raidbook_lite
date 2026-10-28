@@ -78,6 +78,11 @@ def test_lookup_single_playlist_search():
             assert "Video unavailable" in str(e)
 
 
+def test_pipe_args_stream_to_stdout():
+    args = rbm.ytdlp_pipe_args("https://youtu.be/x", "")
+    assert args[-3:] == ["-o", "-", "https://youtu.be/x"] and "--no-playlist" in args
+
+
 def test_ytdlp_args_with_deno():
     assert rbm.ytdlp_base_args("C:/x/deno.exe")[-2:] == ["--js-runtimes", "deno:C:/x/deno.exe"]
     assert "--js-runtimes" not in rbm.ytdlp_base_args("")

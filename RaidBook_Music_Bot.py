@@ -10,7 +10,9 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
 import sys
+import threading
 import time
 
 import discord
@@ -223,6 +225,58 @@ async def _refresh_np(p: GuildPlayer):
 
 
 # ── 재생 흐름 ─────────────────────────────────────────────────────────────
+class YTDLPAudio(discord.FFmpegPCMAudio):
+    """yt-dlp가 받은 오디오를 파이프로 ffmpeg에 넘겨 PCM으로 재생. 끝나거나 건너뛰면 yt-dlp도 종료."""
+
+    def __init__(self, cmd: list, page_url: str, deno: str, ffmpeg: str):
+        kwargs = {"creationflags": 0x08000000} if os.name == "nt" else {}   # CREATE_NO_WINDOW
+        self.last_error = ""
+        self._ytdlp = subprocess.Popen(cmd + rbm.ytdlp_pipe_args(page_url, deno),
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, **kwargs)
+        threading.Thread(target=self._read_errors, daemon=True).start()
+        try:
+            # pipe=True면 ffmpeg가 표준입력(-i -)을 읽으므로 -nostdin을 주면 안 된다
+            super().__init__(self._ytdlp.stdout, pipe=True, executable=ffmpeg or "ffmpeg",
+                             options=rbm.FFMPEG_OPTIONS)
+        except Exception:
+            self._kill_ytdlp()
+            raise
+
+    def _read_errors(self):
+        try:
+            for raw in self._ytdlp.stderr:
+                line = raw.decode("utf-8", "replace").strip()
+                if line:
+                    if line.startswith("ERROR"):
+                        self.last_error = line[:300]
+                    log.warning(f"[yt-dlp] {line[:300]}")
+        except Exception:
+            pass
+
+    def _kill_ytdlp(self):
+        proc, self._ytdlp = getattr(self, "_ytdlp", None), None
+        if proc and proc.poll() is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    def cleanup(self):
+        try:
+            super().cleanup()
+        finally:
+            self._kill_ytdlp()
+
+
+async def _report_failed(p: GuildPlayer, track, err: str):
+    ch = bot.get_channel(p.text_channel_id)
+    if ch:
+        try:
+            await ch.send(f"⚠ 재생할 수 없어 건너뜁니다: **{track.title}**\n`{err}`")
+        except Exception:
+            pass
+
 def _cancel_idle(p: GuildPlayer):
     if p.idle_task and not p.idle_task.done():
         p.idle_task.cancel()
@@ -279,19 +333,11 @@ async def play_next(p: GuildPlayer):
                 _schedule_idle(p)
                 return
             try:
-                url = await rbm.stream_url(cmd, track.url, deno)
-                src = discord.FFmpegPCMAudio(url, executable=ffmpeg or "ffmpeg",
-                                             before_options=rbm.FFMPEG_BEFORE_OPTIONS,
-                                             options=rbm.FFMPEG_OPTIONS)
+                src = YTDLPAudio(cmd, track.url, deno, ffmpeg)
                 source = discord.PCMVolumeTransformer(src, volume=p.volume)
             except Exception as e:
                 log.warning(f"[재생 실패] {track.title}: {type(e).__name__}: {e}")
-                ch = bot.get_channel(p.text_channel_id)
-                if ch:
-                    try:
-                        await ch.send(f"⚠ 재생할 수 없어 건너뜁니다: **{track.title}**\n`{e}`")
-                    except Exception:
-                        pass
+                await _report_failed(p, track, str(e))
                 continue
             break
 
@@ -299,9 +345,14 @@ async def play_next(p: GuildPlayer):
         p.current = track
         p.started_at = time.time()
 
+        started = time.time()
+
         def _after(err):
             if err:
                 log.warning(f"[재생 오류] {track.title}: {err}")
+            # 바로 끝났으면 yt-dlp가 못 받은 것 → 채널에 이유 안내
+            if time.time() - started < 5 and (src.last_error or err):
+                asyncio.run_coroutine_threadsafe(_report_failed(p, track, src.last_error or str(err)), bot.loop)
             asyncio.run_coroutine_threadsafe(play_next(p), bot.loop)
 
         vc.play(source, after=_after)
@@ -554,16 +605,24 @@ async def _register_guild(guild: discord.Guild, only_missing: bool = False) -> i
     if not SHARED_TOKEN:
         bot.tree.copy_global_to(guild=guild)
         return len(await bot.tree.sync(guild=guild))
-    existing = set()
-    if only_missing:
-        existing = {c.name for c in await bot.tree.fetch_commands(guild=guild)}
+    # 이미 같은 내용으로 등록된 명령은 건너뛴다 (매번 8개를 다시 올리면 429 속도 제한에 걸림)
+    existing = {c.name: c for c in await bot.tree.fetch_commands(guild=guild)}
     n = 0
     for cmd in bot.tree.get_commands():
-        if cmd.name in existing:
+        payload = cmd.to_dict(bot.tree)
+        old = existing.get(cmd.name)
+        if old is not None and (only_missing or _same_command(old, payload)):
             continue
-        await bot.http.upsert_guild_command(bot.application_id, guild.id, cmd.to_dict(bot.tree))
+        await bot.http.upsert_guild_command(bot.application_id, guild.id, payload)
         n += 1
     return n
+
+
+def _same_command(old, payload: dict) -> bool:
+    def _opts(opts):
+        return [(o.get("name"), o.get("type"), o.get("description"), bool(o.get("required"))) for o in opts or []]
+    return (old.description == payload.get("description")
+            and _opts(rbm.clean_command_payload(old.to_dict()).get("options")) == _opts(payload.get("options")))
 
 
 async def _sync_slash_commands():
