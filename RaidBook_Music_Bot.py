@@ -18,7 +18,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import RaidBook_music as rbm
-from RaidBook_storage import DailyFileHandler
+from RaidBook_storage import DailyFileHandler, write_json_atomic
 from config_helper import (
     ensure_config_from_template,
     ensure_runtime_tree,
@@ -69,6 +69,16 @@ def _int_set(values) -> set:
             pass
     return out
 
+
+# v1.0.17 설치본이 만든 예전 기본 채널 → 새 기본 채널로 1회 교체
+_OLD_DEFAULT_CHANNEL, _NEW_DEFAULT_CHANNEL = 1565039317695467561, 1565041141890547813
+if [str(c) for c in config.get("command_channel_ids") or []] == [str(_OLD_DEFAULT_CHANNEL)]:
+    config["command_channel_ids"] = [_NEW_DEFAULT_CHANNEL]
+    try:
+        write_json_atomic(CONFIG_PATH, config)
+        log.info(f"[설정] 음악 명령 채널 → {_NEW_DEFAULT_CHANNEL}")
+    except Exception as e:
+        log.warning(f"[설정] 음악 명령 채널 저장 실패 (이번 실행만 적용): {e}")
 
 # 비어 있으면 모든 채널에서 명령 허용
 COMMAND_CHANNEL_IDS = _int_set(config.get("command_channel_ids"))

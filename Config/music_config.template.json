@@ -2,7 +2,7 @@
   "token": "",
   "_token_comment": "비워 두면 Boss Bot 토큰을 같이 사용 (프로그램만 분리). 별도 음악 봇을 쓰려면 그 봇의 토큰 입력",
   "base_dir": "",
-  "command_channel_ids": [1565039317695467561],
+  "command_channel_ids": [1565041141890547813],
   "_command_channel_ids_comment": "음악 명령을 받을 채널 ID 목록. 비우면 모든 채널에서 사용 가능",
   "control_role_ids": [],
   "_control_role_ids_comment": "봇과 같은 음성채널에 없어도 건너뛰기/정지/볼륨을 할 수 있는 역할 ID (서버 관리 권한자는 항상 가능)",
