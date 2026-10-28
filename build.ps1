@@ -27,6 +27,13 @@ if ($LASTEXITCODE -ne 0) { throw "PyInstaller 실패 ($LASTEXITCODE)" }
 $Ffmpeg = (python -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())").Trim()
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path $Ffmpeg)) { throw "ffmpeg 찾기 실패 (pip install imageio-ffmpeg)" }
 Copy-Item $Ffmpeg "dist\ffmpeg.exe" -Force
+# 음악 봇 exe에 음성 라이브러리(PyNaCl·davey·opus)가 실제로 들어갔는지 실행해서 확인
+# (창 없는 exe라 Start-Process -Wait로 종료를 기다리고 출력은 파일로 받는다)
+$selfOut = Join-Path $env:TEMP "raidbook_music_selftest.txt"
+$p = Start-Process -FilePath "dist\RaidBook_Music_Bot.exe" -ArgumentList "--selftest" -Wait -PassThru -NoNewWindow -RedirectStandardOutput $selfOut
+$self = if (Test-Path $selfOut) { (Get-Content $selfOut -Raw -Encoding UTF8) } else { "" }
+Write-Host "  Music Bot $("$self".Trim())"
+if ($p.ExitCode -ne 0) { throw "Music Bot selftest 실패 ($($p.ExitCode)): $self" }
 foreach ($exe in @("RaidBook.exe", "RaidBook_Boss_Bot.exe", "RaidBook_Music_Bot.exe", "ffmpeg.exe")) {
     if (-not (Test-Path "dist\$exe")) { throw "dist\$exe 생성 안 됨" }
     Write-Host ("  ✓ {0} ({1:N1} MB)" -f $exe, ((Get-Item "dist\$exe").Length / 1MB)) -ForegroundColor Green

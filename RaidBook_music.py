@@ -182,7 +182,8 @@ def install_tools(tools_dir: str, log=None) -> list:
 
 
 def ytdlp_base_args(deno_path: str = "") -> list:
-    args = ["--no-warnings", "--no-progress", "--no-color", "--ignore-config"]
+    # --encoding utf-8: Windows에서 제목 등 한글 출력이 CP949로 나와 깨지는 것 방지
+    args = ["--no-warnings", "--no-progress", "--no-color", "--ignore-config", "--encoding", "utf-8"]
     if deno_path:
         args += ["--js-runtimes", f"deno:{deno_path}"]
     return args

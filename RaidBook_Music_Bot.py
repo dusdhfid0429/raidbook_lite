@@ -28,6 +28,31 @@ from config_helper import (
     is_frozen,
 )
 
+# 설치판(PyInstaller)은 PYTHONIOENCODING/PYTHONUTF8 환경변수를 무시해 stdout이 CP949로 나가고,
+# Watchdog이 UTF-8로 읽으면서 로그 창 한글이 깨진다 → 출력 스트림을 직접 UTF-8로 고정 (보스봇과 동일).
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+if "--selftest" in sys.argv:
+    # 빌드 검증용 (build.ps1): 설치판 exe에 음성 라이브러리가 들어갔는지 확인하고 바로 종료
+    _bad = []
+    for _mod in ("nacl.secret", "nacl.utils", "davey"):
+        try:
+            __import__(_mod)
+        except Exception as _e:
+            _bad.append(f"{_mod}: {type(_e).__name__}: {_e}")
+    try:
+        discord.opus._load_default()
+        if not discord.opus.is_loaded():
+            _bad.append("opus: 로드 안 됨")
+    except Exception as _e:
+        _bad.append(f"opus: {type(_e).__name__}: {_e}")
+    print("selftest " + ("OK" if not _bad else "FAIL\n" + "\n".join(_bad)))
+    sys.exit(1 if _bad else 0)
+
 _SCRIPT_DIR = get_app_dir()
 _RUNTIME_DIR = get_runtime_dir()
 ensure_runtime_tree()
@@ -563,6 +588,21 @@ async def _command_guard_loop():
                 log.warning(f"[슬래시 복구 실패] {guild.name}: {type(e).__name__}: {e}")
 
 
+def _check_voice_libs():
+    """음성 재생에 필요한 라이브러리 점검 — 빠졌으면 원인을 로그에 남긴다."""
+    for mod in ("nacl.secret", "davey"):
+        try:
+            __import__(mod)
+        except Exception as e:
+            log.warning(f"[음성 라이브러리] {mod} 불러오기 실패 — 음성 재생 불가: {type(e).__name__}: {e}")
+    try:
+        if not discord.opus.is_loaded():
+            discord.opus._load_default()
+        log.info(f"[음성 라이브러리] opus={'OK' if discord.opus.is_loaded() else '없음'}")
+    except Exception as e:
+        log.warning(f"[음성 라이브러리] opus 불러오기 실패: {type(e).__name__}: {e}")
+
+
 async def _prepare_tools():
     try:
         got = await asyncio.to_thread(rbm.install_tools, TOOLS_DIR, log)
@@ -594,6 +634,7 @@ _ready_once = False
 @bot.event
 async def setup_hook():
     bot.add_view(MusicControlView())
+    _check_voice_libs()
     await _prepare_tools()
     if AUTO_UPDATE:
         asyncio.create_task(_update_loop())

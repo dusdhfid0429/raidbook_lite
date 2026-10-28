@@ -40,6 +40,7 @@ build('RaidBook_boss_Bot.py', 'RaidBook_Boss_Bot', [
 ])
 # 음악 봇 — 음성(PyNaCl·davey·opus) 포함. yt-dlp/deno는 첫 실행 시 Tools 폴더로 받고, ffmpeg.exe는 build.ps1이 dist에 복사
 build('RaidBook_Music_Bot.py', 'RaidBook_Music_Bot', [
-    'discord', 'discord.ext.commands', 'discord.voice_client', 'nacl', 'nacl.secret', 'nacl.utils', 'davey',
+    # _cffi_backend: nacl._sodium이 C 단에서 import해 분석에 안 잡힘 → 빠지면 'PyNaCl library needed' 오류
+    'discord', 'discord.ext.commands', 'discord.voice_client', 'nacl', 'nacl.secret', 'nacl.utils', '_cffi_backend', 'davey',
     'RaidBook_music', 'RaidBook_storage', 'RaidBook_common', 'config_helper',
 ], voice=True)
