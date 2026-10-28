@@ -34,7 +34,7 @@ from discord import ui
 from RaidBook_common import write_json_atomic
 
 CLOSE_GRACE_SEC = 0.8   # 마감 직전 클릭의 네트워크·처리 지연 허용 (판정은 클릭 시각 기준)
-REFRESH_DELAY_SEC = 1.0   # 연타가 멈춘 뒤 최종 상태로 다시 그리기까지 대기
+REFRESH_DELAY_SEC = 0.3   # 잠금이 없을 때 최종 상태로 다시 그리기까지 최소 대기
 
 AMOUNT_HINT = "숫자 또는 단위 표기 (예: 80만, 1.5억, 120만5천, 3,750,000)"
 
@@ -133,6 +133,13 @@ def close_deadline(rec):
     return float(rec["started_ts"]) + int(rec["countdown_sec"])
 
 
+def bid_lock_until(rec):
+    """입찰 직후 잠금 해제 시각 (= 마감 카운트 시작). 이 사이 클릭은 받지 않아 동시 연타로 순서가 꼬이지 않는다."""
+    if (rec or {}).get("status") != "active" or not rec.get("last_bid_at"):
+        return None
+    return float(rec["last_bid_at"]) + BID_SETTLE_SEC
+
+
 def live_block(rec, unit="", now=None):
     """진행 중 경매의 큰 글씨 부분: 최고 입찰자(누른 시각) · 현재가 · 마감 카운트."""
     now = time.time() if now is None else now
@@ -149,7 +156,7 @@ def live_block(rec, unit="", now=None):
     dl = close_deadline(rec)
     if dl:
         lines.append(f"## ⏱️ 마감 <t:{int(dl) + 1}:R>")
-        lines.append(f"-# 입찰 후 {BID_SETTLE_SEC}초 뒤부터 {int(rec['countdown_sec'])}초 카운트 · 새 입찰이 오면 다시 시작")
+        lines.append(f"-# 입찰이 들어오면 {BID_SETTLE_SEC}초 동안 입찰 버튼이 잠기고, 그 뒤 {int(rec['countdown_sec'])}초 카운트 · 새 입찰이 오면 다시 시작")
     return "\n".join(lines)
 
 
@@ -284,29 +291,39 @@ class BossAuction:
             self.log.info(f"[경매 메시지 수정 실패] {type(e).__name__}: {e}")
 
     def schedule_refresh(self, message, delay=None):
-        """연타가 끝난 뒤 저장된 최신 상태로 메시지를 한 번 더 그린다.
+        """저장된 최신 상태로 메시지를 한 번 더 그린다 — 입찰 잠금이 풀리는 순간(카운트 시작)에 맞춰 버튼을 다시 연다.
         클릭마다 보내는 수정 요청은 Discord에 도착하는 순서가 뒤바뀔 수 있어, 앞선 클릭의 화면이
-        마지막에 적용되면 최종 입찰자가 이전 사람으로 보인다 — 마지막 클릭 뒤 delay초 조용하면 최종 상태로 덮어쓴다."""
+        마지막에 적용되면 최종 입찰자가 이전 사람으로 보인다 — 이 갱신이 최종 상태로 덮어쓴다."""
         key = str(message.id)
         old = self._refresh_tasks.pop(key, None)
         if old and not old.done():
             old.cancel()
+        if delay is None:
+            until = self.lock_until(self.store.get(message.id))
+            delay = max(REFRESH_DELAY_SEC, until - self.discord_now() + 0.15) if until else REFRESH_DELAY_SEC
 
         async def _run():
             try:
-                await asyncio.sleep(REFRESH_DELAY_SEC if delay is None else delay)
-                latest = self.store.get(message.id)
-                if not latest:
-                    return
-                if latest.get("type") == "board":
-                    embed = build_board_embed(latest, self.currency, self.discord_now())
-                else:
-                    embed = build_embed(latest, self.currency)
-                await message.edit(embed=embed, view=self.view_for(latest))
+                await asyncio.sleep(max(0.0, delay))
+                for attempt in range(3):
+                    latest = self.store.get(message.id)
+                    if not latest:
+                        return
+                    if latest.get("type") == "board":
+                        embed = build_board_embed(latest, self.currency, self.discord_now())
+                    else:
+                        embed = build_embed(latest, self.currency)
+                    try:
+                        await message.edit(embed=embed, view=self.view_for(latest))
+                        return
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        # 실패하면 버튼이 잠긴 채 남으니 다시 시도
+                        self.log.info(f"[경매 최종 갱신 실패 {attempt + 1}/3] {key}: {type(e).__name__}: {e}")
+                        await asyncio.sleep(1.0)
             except asyncio.CancelledError:
                 pass
-            except Exception as e:
-                self.log.info(f"[경매 최종 갱신 실패] {key}: {type(e).__name__}: {e}")
             finally:
                 if self._refresh_tasks.get(key) is task:
                     self._refresh_tasks.pop(key, None)
@@ -314,10 +331,16 @@ class BossAuction:
         task = asyncio.ensure_future(_run())
         self._refresh_tasks[key] = task
 
+    def lock_until(self, rec):
+        target = board_current(rec) if (rec or {}).get("type") == "board" else rec
+        return bid_lock_until(target) if target else None
+
     def view_for(self, rec):
+        until = self.lock_until(rec)
+        locked = until is not None and self.discord_now() < until
         if (rec or {}).get("type") == "board":
-            return BoardView(self, state=board_state(rec), relist=board_can_relist(rec))
-        return AuctionView(self, state=(rec or {}).get("status", "closed"))
+            return BoardView(self, state=board_state(rec), relist=board_can_relist(rec), locked=locked)
+        return AuctionView(self, state=(rec or {}).get("status", "closed"), locked=locked)
 
     async def load_allowed(self, source_message_id):
         """원본 보스 알림의 참석자 UID 스냅샷 (Excel 조회는 스레드에서 — 입찰 반응 지연 방지)."""
@@ -644,7 +667,7 @@ class AuctionSetupModal(ui.Modal, title="경매 세팅"):
 class AuctionView(ui.View):
     """경매 메시지 버튼 (persistent). 상태: ready / active / closed."""
 
-    def __init__(self, auction: BossAuction, state="ready"):
+    def __init__(self, auction: BossAuction, state="ready", locked=False):
         super().__init__(timeout=None)
         self.auction = auction
         for child in self.children:
@@ -652,7 +675,9 @@ class AuctionView(ui.View):
             if cid == "boss_auc_start":
                 child.disabled = state != "ready"
             elif cid == "boss_auc_bid":
-                child.disabled = state != "active"
+                child.disabled = state != "active" or locked
+                if locked and state == "active":
+                    child.label, child.emoji = "잠시 대기", "⏳"
             elif cid == "boss_auc_stop":
                 child.disabled = state == "closed"
 
@@ -696,6 +721,9 @@ class AuctionView(ui.View):
                 dl = close_deadline(rec)
                 if dl is not None and clicked >= dl:
                     reject = "⏰ 카운트가 끝난 뒤 눌렀어요. 마감 처리됩니다."
+                elif (until := bid_lock_until(rec)) and clicked < until and str(rec.get("bidder_id")) != str(interaction.user.id):
+                    reject = (f"⏳ 방금 **{rec.get('bidder_name')}**님 입찰이 먼저 들어왔어요. "
+                              f"{BID_SETTLE_SEC}초 뒤 카운트가 시작되면 다시 눌러 주세요.")
                 elif rec.get("status") == "active" and not a.can_bid(rec, interaction.user.id):
                     reject = "🔐 이 경매는 해당 보스탐 참석자만 입찰할 수 있어요."
                 else:
@@ -1209,7 +1237,7 @@ class BoardView(ui.View):
     """경매 진행판 버튼 (persistent): ▶️ 경매시작 (관리자, 아이템마다) / 🙋 입찰 / ⏹️ 종료 (관리자)
     / 🔁 유찰 재경매 (관리자, 끝난 뒤 유찰 아이템만 새 진행판으로)."""
 
-    def __init__(self, auction: BossAuction, state="waiting", relist=False):
+    def __init__(self, auction: BossAuction, state="waiting", relist=False, locked=False):
         super().__init__(timeout=None)
         self.auction = auction
         for child in self.children:
@@ -1217,7 +1245,9 @@ class BoardView(ui.View):
             if cid == "boss_board_start":
                 child.disabled = state != "waiting"
             elif cid == "boss_board_bid":
-                child.disabled = state != "active"
+                child.disabled = state != "active" or locked
+                if locked and state == "active":
+                    child.label, child.emoji = "잠시 대기", "⏳"
             elif cid == "boss_board_stop":
                 child.disabled = state == "closed"
             elif cid == "boss_board_relist":
@@ -1262,6 +1292,9 @@ class BoardView(ui.View):
                     reject = f"⏳ **{lot_label(lot)}** 경매는 <t:{int(started) + 1}:R> 시작해요."
                 elif dl is not None and clicked >= dl:
                     reject = "⏰ 카운트가 끝난 뒤 눌렀어요. 마감 처리됩니다."
+                elif (until := bid_lock_until(lot)) and clicked < until and str(lot.get("bidder_id")) != str(interaction.user.id):
+                    reject = (f"⏳ 방금 **{lot.get('bidder_name')}**님 입찰이 먼저 들어왔어요. "
+                              f"{BID_SETTLE_SEC}초 뒤 카운트가 시작되면 다시 눌러 주세요.")
                 elif not a.can_bid(board, interaction.user.id):
                     reject = "🔐 이 경매는 해당 보스탐 참석자만 입찰할 수 있어요."
                 else:
