@@ -178,12 +178,14 @@ def start_interval(name, interval_hours, start_hour, start_minute, alert_minutes
     return task
 
 
-async def run_daily(name, spawn_time_str, alert_minutes, post_cb, daily_states, log=None):
+async def run_daily(name, spawn_time_str, alert_minutes, post_cb, daily_states, log=None, already_sent=None):
     """daily형 무한 루프 (기존 schedule_boss_fixed_time 의미 유지).
 
     매 반복 상단에서 다음 occurrence를 재계산 — 알림 직후 재슬립으로 인한
     경계 누락(정확히 그 시각에 깨어 '이미 지남' 처리) 버그를 피한다.
     daily_states에서 name이 빠지면 루프 종료.
+    시작 시점이 알림 시각과 출현 시각 사이면(알림 직후 재시작 등) 그 회차를 바로 보낸다.
+    already_sent(name, spawn_dt, alert_dt) → True면 이미 보낸 회차라 건너뛴다 (중복 알림 방지).
     """
     log = log or _default_log
     try:
@@ -198,6 +200,7 @@ async def run_daily(name, spawn_time_str, alert_minutes, post_cb, daily_states, 
         log.warning(f"[daily 스케줄 중단] {name} | 시각 형식 오류: {spawn_time_str!r} (HH:MM 필요)")
         return
 
+    first = True
     while True:
         if name not in daily_states:
             break
@@ -207,6 +210,27 @@ async def run_daily(name, spawn_time_str, alert_minutes, post_cb, daily_states, 
         if next_day_spawn:
             spawn_dt += timedelta(days=1)
         alert_dt = spawn_dt - timedelta(minutes=alert_minutes)
+
+        # 알림 시각~출현 시각 사이에 (재)시작됐으면 이번 회차를 놓치지 않고 바로 보낸다
+        if first:
+            first = False
+            for back in (0, 1):   # 자정을 넘는 회차(23:40 알림 → 00:00 출현) 대비 하루 전 회차도 확인
+                s_dt, a_dt = spawn_dt - timedelta(days=back), alert_dt - timedelta(days=back)
+                if a_dt <= now < s_dt:
+                    sent = False
+                    if already_sent is not None:
+                        try:
+                            sent = bool(already_sent(name, s_dt, a_dt))
+                        except Exception as e:
+                            log.info(f"[daily] {name} 중복 확인 실패 — 보내지 않음: {e}")
+                            sent = True
+                    if not sent:
+                        log.info(f"[daily] {name} {spawn_time_str} | 알림 시각이 지나 시작됨 → 바로 알림 (출현 {s_dt.strftime('%m-%d %H:%M')})")
+                        try:
+                            await post_cb(name, s_dt)
+                        except Exception as e:
+                            log.info(f"[daily 알림 실패] {name} {spawn_time_str}: {e}")
+                    break
 
         # 이미 지난 경우 다음날로 (복수 일 밀릴 수 있으므로 while)
         while alert_dt <= now:

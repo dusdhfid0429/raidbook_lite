@@ -3291,7 +3291,22 @@ async def schedule_boss_fixed_time(boss_name, spawn_time_str, alert_minutes):
     타이밍은 공용 엔진(RaidBook_schedule), 게시는 _post_boss_alert."""
     await rb_schedule.run_daily(
         boss_name, spawn_time_str, alert_minutes,
-        _post_boss_alert, boss_daily_states, log)
+        _post_boss_alert, boss_daily_states, log, already_sent=_alert_already_sent)
+
+
+def _alert_already_sent(boss_name, spawn_dt, alert_dt):
+    """같은 보스·출현 시각 알림이 이번 알림 시각 이후에 이미 게시됐는지 (재시작 직후 중복 알림 방지)."""
+    boss_time = spawn_dt.strftime("%H:%M")
+    since = (alert_dt - timedelta(minutes=5)).timestamp()
+    for mid, info in load_active_messages().items():
+        if info.get("boss_name") != boss_name or info.get("boss_time") != boss_time:
+            continue
+        try:
+            if ((int(mid) >> 22) + 1420070400000) / 1000 >= since:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 
