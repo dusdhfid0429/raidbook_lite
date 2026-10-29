@@ -2358,9 +2358,9 @@ class WatchdogApp(tk.Tk):
         # Step 2 — TTS Bot (선택)
         s2 = _mk()
         _step_header(s2, "\U0001f50a", "TTS Bot 설정 (선택)",
-                     "채팅에 #내용 을 쓰면 음성채널에서 읽어 주는 봇입니다. 쓰지 않으면 비워 두세요.\n"
+                     "/tts 내용 으로 쓴 글을 음성채널에서 읽어 주는 봇입니다. 쓰지 않으면 비워 두세요.\n"
                      "서버에 따로 추가한 TTS 전용 봇의 토큰을 넣어야 합니다 (Boss Bot 토큰과 달라야 함).\n"
-                     "TTS 봇의 Bot 탭에서 Message Content Intent를 꼭 켜 주세요. 'tts' 채널은 자동으로 만듭니다.")
+                     "'tts' 채널은 자동으로 만듭니다 (TTS 봇에 채널 관리 권한이 있을 때).")
         _field(s2, "봇 토큰",       v["tts_token"],  required=False, hide=True,
                tip="TTS 전용 Discord 봇 토큰 (선택)")
 

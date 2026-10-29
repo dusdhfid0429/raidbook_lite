@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""RaidBook_tts 테스트 — '#' 메시지 해석, 읽을 문장 정리."""
+"""RaidBook_tts 테스트 — /tts 결과 메시지 형식·되읽기, 읽을 문장 정리."""
 import os
 import sys
 
@@ -8,17 +8,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import RaidBook_tts as rbt  # noqa: E402
 
 
-def test_parse():
-    assert rbt.parse_tts_message("#안녕하세요") == ("2", "안녕하세요")
-    assert rbt.parse_tts_message("# 안녕", default_voice="1") == ("1", "안녕")
-    assert rbt.parse_tts_message("#1 보스 떴어요") == ("1", "보스 떴어요")
-    assert rbt.parse_tts_message("#2  집합") == ("2", "집합")
-    assert rbt.parse_tts_message("#1") == (None, None)          # 목소리만 있고 내용 없음
-    assert rbt.parse_tts_message("#") == (None, None)
-    assert rbt.parse_tts_message("## 공지 제목") == (None, None)  # 디스코드 제목 서식
-    assert rbt.parse_tts_message("안녕 #태그") == (None, None)
-    assert rbt.parse_tts_message("#10시 집합") == ("2", "10시 집합")
-    assert rbt.parse_tts_message("#안녕", default_voice="9") == ("2", "안녕")
+def test_post_roundtrip():
+    post = rbt.format_post("1", "동훈", "보스 떴어요: 집합!")
+    assert post == "🔊 👨 **동훈**: 보스 떴어요: 집합!", post
+    assert rbt.parse_post(post) == ("1", "동훈", "보스 떴어요: 집합!")
+    multi = rbt.format_post("2", "a**b", "첫 줄\n둘째 줄")
+    assert rbt.parse_post(multi) == ("2", "a b", "첫 줄\n둘째 줄"), rbt.parse_post(multi)
+    assert rbt.format_post("9", "x", "y").startswith("🔊 👩")   # 모르는 목소리 → 여성
+    assert rbt.parse_post("그냥 채팅") is None
+    assert rbt.parse_post("") is None
 
 
 def test_clean():

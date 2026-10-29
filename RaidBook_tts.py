@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
-"""TTS 봇 공용 로직 — `#` 메시지 해석, 읽을 문장 정리 (Discord 의존 없음, 테스트 가능).
+"""TTS 봇 공용 로직 — /tts 결과 메시지 형식, 읽을 문장 정리 (Discord 의존 없음, 테스트 가능).
 
-#텍스트      → 기본 목소리
-#1 텍스트    → 남성 (ko-KR-InJoonNeural)
-#2 텍스트    → 여성 (ko-KR-SunHiNeural)
+/tts 내용:<텍스트> [목소리:남성|여성] → 채널에 '🔊 👩 **닉네임**: 텍스트' 메시지 + 🔄 다시 듣기 버튼.
+다시 듣기는 이 메시지 내용을 해석해서 읽는다 (재시작 후에도 동작).
 """
 import re
 
@@ -12,13 +11,17 @@ VOICES = {
     "2": "ko-KR-SunHiNeural",
 }
 VOICE_LABELS = {"1": "👨 남성", "2": "👩 여성"}
+VOICE_ICONS = {"1": "👨", "2": "👩"}
+_ICON_VOICE = {v: k for k, v in VOICE_ICONS.items()}
 
-TTS_COMMAND_NAMES = ("tts퇴장", "tts건너뛰기", "tts대기열")
+TTS_COMMAND_NAMES = ("tts", "tts퇴장", "tts건너뛰기", "tts대기열")
 
 _URL = re.compile(r"https?://\S+")
 _CUSTOM_EMOJI = re.compile(r"<a?:(\w+):\d+>")
 _MENTION = re.compile(r"<(@!?|@&|#)(\d+)>")
 _SPACES = re.compile(r"\s+")
+_MD = re.compile(r"\*+|\n")
+_POST = re.compile(r"^🔊 (👨|👩) \*\*(.*?)\*\*: (.+)$", re.S)
 
 
 def voice_key(key) -> str:
@@ -27,23 +30,17 @@ def voice_key(key) -> str:
     return k if k in VOICES else "2"
 
 
-def parse_tts_message(content: str, default_voice="2"):
-    """'#'으로 시작하는 메시지 → (목소리 키, 텍스트). 대상이 아니면 (None, None).
+def format_post(voice: str, display_name: str, text: str) -> str:
+    """채널에 남기는 메시지 — 다시 듣기 버튼이 이 내용을 parse_post로 되읽는다."""
+    return f"🔊 {VOICE_ICONS[voice_key(voice)]} **{_MD.sub(' ', display_name)}**: {text}"
 
-    '## 제목'처럼 #이 여러 개면 디스코드 제목 서식이므로 읽지 않는다.
-    """
-    content = (content or "").strip()
-    if not content.startswith("#") or content.startswith("##"):
-        return None, None
-    raw = content[1:].strip()
-    if not raw:
-        return None, None
-    parts = raw.split(None, 1)
-    if parts[0] in VOICES:
-        if len(parts) < 2 or not parts[1].strip():
-            return None, None
-        return parts[0], parts[1].strip()
-    return voice_key(default_voice), raw
+
+def parse_post(content: str):
+    """format_post 메시지 → (목소리 키, 닉네임, 텍스트). 형식이 다르면 None."""
+    m = _POST.match(content or "")
+    if not m:
+        return None
+    return _ICON_VOICE[m.group(1)], m.group(2), m.group(3)
 
 
 def clean_for_speech(text: str, names=None, max_len: int = 200) -> str:

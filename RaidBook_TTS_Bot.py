@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""RaidBook TTS Bot — 채팅 '#메시지'를 음성채널에서 읽어 주는 별도 봇 (전용 토큰).
+"""RaidBook TTS Bot — /tts 로 쓴 글을 음성채널에서 읽어 주는 별도 봇 (전용 토큰).
 
-#텍스트 / #1 텍스트(남성) / #2 텍스트(여성) → 작성자가 있는 음성채널에 들어가 읽는다.
-원본 메시지의 🔄 리액션을 누르면 다시 읽는다. /tts퇴장 /tts건너뛰기 /tts대기열.
+/tts 내용:<텍스트> [목소리:남성|여성] → 쓴 사람이 있는 음성채널에 들어가 읽고, 채널에 글과 🔄 다시 듣기 버튼을 남긴다.
+/tts퇴장 /tts건너뛰기 /tts대기열.
 설정: Config/tts_config.json — 보스봇·음악봇과 다른 전용 봇 토큰이 필요 (같은 봇이면 음성채널을 서로 뺏음).
 """
 import asyncio
@@ -95,7 +95,7 @@ READ_NAME = bool(config.get("read_name", True))
 DEFAULT_VOICE_CHANNEL_ID = _int_or_none(config.get("default_voice_channel_id"))
 IDLE_DISCONNECT = max(0, int(config.get("idle_disconnect_seconds", 600) or 0))
 IPC_PORT = int(config.get("ipc_port", 7704) or 7704)
-REPLAY_EMOJI = "🔄"
+REPLAY_ID = "rbtts:replay"   # persistent 버튼 — 재시작 후에도 메시지 내용으로 다시 읽음
 TMP_DIR = os.path.join(tempfile.gettempdir(), "RaidBook_TTS")
 os.makedirs(TMP_DIR, exist_ok=True)
 FFMPEG = find_ffmpeg(_SCRIPT_DIR, TOOLS_DIR) or "ffmpeg"
@@ -112,8 +112,7 @@ def _allowed_ids() -> set:
 
 ALLOWED_CHANNEL_IDS = _allowed_ids()   # 비어 있으면 모든 채널
 
-intents = discord.Intents.default()
-intents.message_content = True   # '#메시지' 내용을 읽으려면 필요 (개발자 포털에서 켜야 함)
+intents = discord.Intents.default()   # 슬래시 명령만 쓰므로 Message Content Intent 불필요
 bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents, help_command=None)
 
 
@@ -225,79 +224,79 @@ def _target_voice_channel(member):
     return None
 
 
-def _build_text(message: discord.Message, text: str) -> str:
-    names = {m.id: m.display_name for m in message.mentions}
-    names.update({r.id: r.name for r in message.role_mentions})
-    names.update({c.id: c.name for c in message.channel_mentions})
-    body = rbt.clean_for_speech(text, names, MAX_LENGTH)
-    if not body:
-        return ""
-    return rbt.speech_text(message.author.display_name, body, READ_NAME)
+def _mention_names(guild: discord.Guild, text: str) -> dict:
+    """슬래시 입력 속 <@id>/<@&id>/<#id> → 이름."""
+    names = {}
+    for kind, sid in rbt._MENTION.findall(text or ""):
+        i = int(sid)
+        obj = guild.get_role(i) if kind == "@&" else (guild.get_channel(i) if kind == "#" else guild.get_member(i))
+        if obj is not None:
+            names[i] = getattr(obj, "display_name", None) or obj.name
+    return names
 
 
 def _channel_allowed(channel_id: int) -> bool:
     return not ALLOWED_CHANNEL_IDS or channel_id in ALLOWED_CHANNEL_IDS
 
 
-@bot.event
-async def on_message(message: discord.Message):
-    if message.author.bot or message.guild is None or not _channel_allowed(message.channel.id):
-        return
-    voice, text = rbt.parse_tts_message(message.content, DEFAULT_VOICE)
-    if not text:
-        return
-    full = _build_text(message, text)
-    if not full:
-        return
-    voice_channel = _target_voice_channel(message.author)
-    if voice_channel is None:
-        await message.channel.send("❌ 음성채널에 먼저 입장해 주세요!", delete_after=5)
-        return
-    if not await _enqueue(message.guild, voice_channel, full, voice):
-        await message.channel.send(f"❌ 대기열이 가득 찼어요! (최대 {MAX_QUEUE}개)", delete_after=5)
-        return
-    log.info(f"[TTS] {message.author.display_name} | {rbt.VOICE_LABELS[voice]} | {text[:60]} | 대기 {_state(message.guild.id).queue.qsize()}개")
-    try:
-        await message.add_reaction(REPLAY_EMOJI)
-    except Exception:
-        pass
+def _channel_hint() -> str:
+    return " ".join(f"<#{c}>" for c in sorted(ALLOWED_CHANNEL_IDS))
 
 
-@bot.event
-async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
-    """원본 메시지의 🔄 리액션 → 다시 읽기 (누른 사람이 있는 음성채널)."""
-    if str(payload.emoji) != REPLAY_EMOJI or payload.user_id == bot.user.id or not payload.guild_id:
-        return
-    if not _channel_allowed(payload.channel_id):
-        return
-    guild = bot.get_guild(payload.guild_id)
-    channel = bot.get_channel(payload.channel_id)
-    if guild is None or channel is None:
-        return
-    try:
-        msg = await channel.fetch_message(payload.message_id)
-    except Exception:
-        return
-    if msg.author.bot:
-        return
-    voice, text = rbt.parse_tts_message(msg.content, DEFAULT_VOICE)
-    if not text:
-        return
-    member = payload.member or guild.get_member(payload.user_id)
-    try:   # 리액션을 지워야 다음에 또 누를 수 있음
-        await msg.remove_reaction(REPLAY_EMOJI, member or discord.Object(id=payload.user_id))
-    except Exception:
-        pass
-    voice_channel = _target_voice_channel(member)
+async def _queue_speech(interaction: discord.Interaction, voice: str, name: str, text: str):
+    """읽기 대기열에 넣는다. 문제가 있으면 안내 문구, 성공하면 None."""
+    if not _channel_allowed(interaction.channel_id):
+        return f"❌ TTS는 {_channel_hint()} 채널에서 써 주세요."
+    voice_channel = _target_voice_channel(interaction.user)
     if voice_channel is None:
-        await channel.send(f"❌ <@{payload.user_id}> 음성채널에 먼저 입장해 주세요!", delete_after=5)
-        return
-    full = _build_text(msg, text)
-    if full and not await _enqueue(guild, voice_channel, full, voice):
-        await channel.send(f"❌ <@{payload.user_id}> 대기열이 가득 찼어요!", delete_after=5)
+        return "❌ 음성채널에 먼저 입장해 주세요!"
+    body = rbt.clean_for_speech(text, _mention_names(interaction.guild, text), MAX_LENGTH)
+    if not body:
+        return "❌ 읽을 내용이 없어요."
+    if not await _enqueue(interaction.guild, voice_channel, rbt.speech_text(name, body, READ_NAME), voice):
+        return f"❌ 대기열이 가득 찼어요! (최대 {MAX_QUEUE}개)"
+    return None
+
+
+class ReplayView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="다시 듣기", emoji="🔄", style=discord.ButtonStyle.secondary, custom_id=REPLAY_ID)
+    async def replay(self, interaction: discord.Interaction, button: discord.ui.Button):
+        parsed = rbt.parse_post(interaction.message.content if interaction.message else "")
+        if not parsed:
+            await interaction.response.send_message("❌ 다시 읽을 내용을 찾지 못했어요.", ephemeral=True)
+            return
+        voice, name, text = parsed
+        err = await _queue_speech(interaction, voice, name, text)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+        else:
+            await interaction.response.defer()
+            log.info(f"[다시 듣기] {interaction.user.display_name} → {name}: {text[:60]}")
 
 
 # ── 슬래시 명령 ───────────────────────────────────────────────────────────
+@bot.tree.command(name="tts", description="입력한 글을 음성채널에서 읽어 줍니다")
+@app_commands.describe(내용="읽어 줄 글", 목소리="기본은 설정값(여성)")
+@app_commands.choices(목소리=[app_commands.Choice(name="👩 여성", value="2"),
+                           app_commands.Choice(name="👨 남성", value="1")])
+@app_commands.guild_only()
+async def cmd_tts(interaction: discord.Interaction, 내용: app_commands.Range[str, 1, 500],
+                  목소리: app_commands.Choice[str] = None):
+    voice = rbt.voice_key(목소리.value if 목소리 else DEFAULT_VOICE)
+    name = interaction.user.display_name
+    err = await _queue_speech(interaction, voice, name, 내용)
+    if err:
+        await interaction.response.send_message(err, ephemeral=True)
+        return
+    # 채팅에도 남겨서 못 들은 사람이 보거나 🔄로 다시 듣게 한다 (멘션 알림은 보내지 않음)
+    await interaction.response.send_message(rbt.format_post(voice, name, 내용), view=ReplayView(),
+                                            allowed_mentions=discord.AllowedMentions.none())
+    log.info(f"[TTS] {name} | {rbt.VOICE_LABELS[voice]} | {내용[:60]} | 대기 {_state(interaction.guild.id).queue.qsize()}개")
+
+
 @bot.tree.command(name="tts퇴장", description="TTS 봇을 음성채널에서 내보내고 대기열을 비웁니다")
 @app_commands.guild_only()
 async def cmd_leave(interaction: discord.Interaction):
@@ -379,7 +378,7 @@ async def _ensure_tts_channel():
         log.warning(f"[채널 자동 생성 실패] {type(e).__name__}: {e}")
         return
     for p in problems:
-        log.warning(f"[채널 자동 생성] {p} — 모든 채널의 #메시지를 읽습니다")
+        log.warning(f"[채널 자동 생성] {p} — 모든 채널에서 /tts를 받습니다")
     if created:
         ALLOWED_CHANNEL_IDS = _allowed_ids()
 
@@ -413,6 +412,7 @@ _ready_once = False
 
 @bot.event
 async def setup_hook():
+    bot.add_view(ReplayView())
     _check_voice_libs()
     try:
         server = await asyncio.start_server(_ipc_handle, "127.0.0.1", IPC_PORT)
@@ -425,7 +425,7 @@ async def setup_hook():
 @bot.event
 async def on_ready():
     global _ready_once
-    log.info(f"[준비 완료] {bot.user} — 서버 {len(bot.guilds)}개 (#텍스트 / #1 남성 / #2 여성)")
+    log.info(f"[준비 완료] {bot.user} — 서버 {len(bot.guilds)}개 (/tts 내용 [목소리])")
     if _ready_once:
         return
     _ready_once = True
@@ -494,10 +494,6 @@ if __name__ == "__main__":
     _token = _wait_for_token()
     try:
         bot.run(_token, log_handler=None)
-    except discord.PrivilegedIntentsRequired:
-        log.error("[시작 실패] Discord 개발자 포털 → TTS 봇 → Bot 탭에서 'Message Content Intent'를 켜 주세요. 10분 뒤(또는 토큰 변경 시) 다시 시도합니다.")
-        _wait_after_failure(_token)
-        sys.exit(1)
     except discord.LoginFailure:
         log.error("[시작 실패] TTS 봇 토큰이 올바르지 않습니다. 토큰을 다시 복사해 넣어 주세요. 토큰을 바꾸면 바로 다시 시도합니다.")
         _wait_after_failure(_token)
