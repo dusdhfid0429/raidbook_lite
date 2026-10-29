@@ -8,12 +8,13 @@
   "default_voice_channel_id": null,
   "_default_voice_channel_id_comment": "작성자가 음성채널에 없을 때 대신 들어갈 음성채널 ID (비우면 '음성채널에 먼저 입장' 안내)",
   "default_voice": "2",
-  "_default_voice_comment": "/tts 기본 목소리: 1=남성, 2=여성 (/tts 의 목소리 옵션으로 골라 쓸 수 있음)",
+  "_default_voice_comment": "기본 목소리: 1=남성(ko-KR-InJoonNeural), 2=여성(ko-KR-SunHiNeural) — 전체판과 같음. /tts 1 내용, /tts 2 내용 또는 목소리 옵션으로 고름",
   "read_name": true,
   "_read_name_comment": "true면 '닉네임, 내용' 순으로 읽음",
   "max_queue": 10,
-  "max_length": 200,
-  "idle_disconnect_seconds": 600,
-  "_idle_disconnect_seconds_comment": "마지막으로 읽은 뒤 이 시간(초) 동안 조용하면 음성채널에서 나감. 0=나가지 않음",
+  "max_length": 0,
+  "_max_length_comment": "읽을 최대 글자 수. 0=제한 없음",
+  "idle_disconnect_seconds": 0,
+  "_idle_disconnect_seconds_comment": "0이면 전체판처럼 /tts퇴장 전까지 음성채널에 머묾. 초를 넣으면 그 시간 동안 조용할 때 나감",
   "ipc_port": 7704
 }

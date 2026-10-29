@@ -89,11 +89,11 @@ def _int_or_none(v):
 
 
 MAX_QUEUE = max(1, int(config.get("max_queue", 10) or 10))
-MAX_LENGTH = max(20, int(config.get("max_length", 200) or 200))
+MAX_LENGTH = max(0, int(config.get("max_length", 0) or 0))   # 0=제한 없음 (전체판과 같음)
 DEFAULT_VOICE = rbt.voice_key(config.get("default_voice", "2"))
 READ_NAME = bool(config.get("read_name", True))
 DEFAULT_VOICE_CHANNEL_ID = _int_or_none(config.get("default_voice_channel_id"))
-IDLE_DISCONNECT = max(0, int(config.get("idle_disconnect_seconds", 600) or 0))
+IDLE_DISCONNECT = max(0, int(config.get("idle_disconnect_seconds", 0) or 0))   # 0=계속 머묾 (전체판과 같음)
 IPC_PORT = int(config.get("ipc_port", 7704) or 7704)
 REPLAY_ID = "rbtts:replay"   # persistent 버튼 — 재시작 후에도 메시지 내용으로 다시 읽음
 TMP_DIR = os.path.join(tempfile.gettempdir(), "RaidBook_TTS")
@@ -279,13 +279,18 @@ class ReplayView(discord.ui.View):
 
 # ── 슬래시 명령 ───────────────────────────────────────────────────────────
 @bot.tree.command(name="tts", description="입력한 글을 음성채널에서 읽어 줍니다")
-@app_commands.describe(내용="읽어 줄 글", 목소리="기본은 설정값(여성)")
+@app_commands.describe(내용="읽어 줄 글 (앞에 1 = 남성, 2 = 여성)", 목소리="기본은 설정값(여성)")
 @app_commands.choices(목소리=[app_commands.Choice(name="👩 여성", value="2"),
                            app_commands.Choice(name="👨 남성", value="1")])
 @app_commands.guild_only()
 async def cmd_tts(interaction: discord.Interaction, 내용: app_commands.Range[str, 1, 500],
                   목소리: app_commands.Choice[str] = None):
-    voice = rbt.voice_key(목소리.value if 목소리 else DEFAULT_VOICE)
+    # 전체판 #1/#2 처럼 '1 내용'(남성) / '2 내용'(여성)으로도 고를 수 있음 (옵션이 우선)
+    prefixed, 내용 = rbt.split_voice_prefix(내용)
+    if not 내용:
+        await interaction.response.send_message("❌ 읽을 내용이 없어요.", ephemeral=True)
+        return
+    voice = rbt.voice_key(목소리.value if 목소리 else (prefixed or DEFAULT_VOICE))
     name = interaction.user.display_name
     err = await _queue_speech(interaction, voice, name, 내용)
     if err:

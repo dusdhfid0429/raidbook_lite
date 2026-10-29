@@ -30,6 +30,15 @@ def voice_key(key) -> str:
     return k if k in VOICES else "2"
 
 
+def split_voice_prefix(text: str):
+    """전체판 '#1 내용'/'#2 내용' 습관 그대로 — '1 내용' → ("1", "내용"). 접두어가 없으면 (None, 원문)."""
+    text = (text or "").strip()
+    parts = text.split(None, 1)
+    if parts and parts[0] in VOICES:
+        return parts[0], (parts[1].strip() if len(parts) > 1 else "")
+    return None, text
+
+
 def format_post(voice: str, display_name: str, text: str) -> str:
     """채널에 남기는 메시지 — 다시 듣기 버튼이 이 내용을 parse_post로 되읽는다."""
     return f"🔊 {VOICE_ICONS[voice_key(voice)]} **{_MD.sub(' ', display_name)}**: {text}"
@@ -43,7 +52,7 @@ def parse_post(content: str):
     return _ICON_VOICE[m.group(1)], m.group(2), m.group(3)
 
 
-def clean_for_speech(text: str, names=None, max_len: int = 200) -> str:
+def clean_for_speech(text: str, names=None, max_len: int = 0) -> str:
     """읽기 좋게 정리 — 링크는 '링크', 커스텀 이모지는 이름, 멘션은 이름(names: {id: 이름})."""
     names = names or {}
     text = _URL.sub(" 링크 ", text or "")

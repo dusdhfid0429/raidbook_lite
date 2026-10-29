@@ -19,6 +19,15 @@ def test_post_roundtrip():
     assert rbt.parse_post("") is None
 
 
+def test_voice_prefix():
+    assert rbt.split_voice_prefix("1 보스 떴어요") == ("1", "보스 떴어요")
+    assert rbt.split_voice_prefix("2  집합") == ("2", "집합")
+    assert rbt.split_voice_prefix("1") == ("1", "")
+    assert rbt.split_voice_prefix("10시 집합") == (None, "10시 집합")
+    assert rbt.split_voice_prefix(" 안녕 ") == (None, "안녕")
+    assert rbt.VOICES == {"1": "ko-KR-InJoonNeural", "2": "ko-KR-SunHiNeural"}   # 전체판과 같은 목소리
+
+
 def test_clean():
     t = rbt.clean_for_speech("이거 봐 https://youtu.be/abc <:pepe:123> <@42> <@!43>", {42: "철수"})
     assert t == "이거 봐 링크 pepe 철수", t
