@@ -16,6 +16,8 @@
   "close_minutes": 0,
   "admin_role_ids": [],
   "_admin_role_ids_comment": "버튼/명령 관리자 역할 ID 목록. 서버 소유자·서버 관리 권한 보유자는 항상 허용.",
+  "admin_role_names": ["운영진"],
+  "_admin_role_names_comment": "이 이름의 역할을 가진 멤버도 관리자 (인원체크·경매 시작/종료·재경매·정산·득템 기록 등). 역할 ID 대신 이름으로 지정",
   "voice_channel_ids": [],
   "_voice_channel_ids_comment": "정각 자동 인원체크 대상 음성채널 ID 목록. 비우면 서버의 모든 음성채널(AFK 제외). /인원체크는 명령을 입력한 음성채널 기준.",
   "voice_check_at_spawn": true,

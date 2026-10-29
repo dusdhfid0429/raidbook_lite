@@ -271,6 +271,8 @@ COMMAND_CHANNEL_ID = config.get("command_channel_id", ALERT_CHANNEL_ID)
 LOOT_CHANNEL_ID = config.get("loot_channel_id", COMMAND_CHANNEL_ID)
 # 슬래시 명령 사용 허용 역할 (서버 관리 권한 보유자는 항상 허용)
 ADMIN_ROLE_IDS = {int(r) for r in (config.get("admin_role_ids") or []) if r}
+# 역할 이름으로도 관리자 판정 (서버에서 '운영진' 역할을 주면 바로 인원체크·경매·정산 사용 가능)
+ADMIN_ROLE_NAMES = {str(n).strip() for n in (config.get("admin_role_names", ["운영진"]) or []) if str(n).strip()}
 # 음성채널 인원체크 대상 채널 (비우면 서버의 모든 음성채널, AFK 채널 제외)
 VOICE_CHANNEL_IDS = [int(c) for c in (config.get("voice_channel_ids") or []) if c]
 # 보스 출현 정각에 음성채널 접속자를 자동 참석 처리
@@ -2386,7 +2388,7 @@ class AttendView(ui.View):
         canonical_uid = _resolve_uid(uid)
         if uid in self.attendees or canonical_uid in {_resolve_uid(a) for a in self.attendees}:
             return True
-        return uid in LOOT_FORCE_USER_IDS or canonical_uid in LOOT_FORCE_USER_IDS
+        return uid in LOOT_FORCE_USER_IDS or canonical_uid in LOOT_FORCE_USER_IDS or _is_bot_admin(user)
 
     async def _load_for_modal(self, interaction: discord.Interaction):
         """팝업용 알림 데이터 로드. 진행 중 알림은 즉시(팝업을 첫 응답으로 띄울 수 있음),
@@ -2491,7 +2493,8 @@ class AttendView(ui.View):
         canonical_uid = _resolve_uid(uid)
         attendee_canonicals = {_resolve_uid(a) for a in self.attendees}
         is_attendee = (uid in self.attendees) or (canonical_uid in attendee_canonicals)
-        is_force_allowed = (uid in LOOT_FORCE_USER_IDS) or (canonical_uid in LOOT_FORCE_USER_IDS)
+        is_force_allowed = (uid in LOOT_FORCE_USER_IDS) or (canonical_uid in LOOT_FORCE_USER_IDS) \
+            or _is_bot_admin(interaction.user)
 
         if not is_attendee and not is_force_allowed:
             try:
@@ -3245,7 +3248,8 @@ async def on_message(message):
 
 
 def _is_bot_admin(member) -> bool:
-    """명령 사용 권한: 서버 소유자, 서버 관리/관리자 권한 또는 config admin_role_ids 역할 보유."""
+    """명령 사용 권한: 서버 소유자, 서버 관리/관리자 권한, 또는 관리자 역할 보유
+    (config admin_role_ids 의 역할 ID, admin_role_names 의 역할 이름 — 기본 '운영진')."""
     if not isinstance(member, discord.Member):
         return False
     if member.guild is not None and member.id == member.guild.owner_id:
@@ -3253,7 +3257,7 @@ def _is_bot_admin(member) -> bool:
     perms = member.guild_permissions
     if perms.administrator or perms.manage_guild:
         return True
-    return any(r.id in ADMIN_ROLE_IDS for r in member.roles)
+    return any(r.id in ADMIN_ROLE_IDS or r.name.strip() in ADMIN_ROLE_NAMES for r in member.roles)
 
 
 boss_auction = BossAuction(bot, channel_id=AUCTION_CHANNEL_ID, data_dir=DATA_DIR,
@@ -3273,7 +3277,7 @@ async def _slash_permission_check(ctx):
         return False  # ! 접두사 명령 비활성 (on_message에서도 처리하지 않음)
     if _is_bot_admin(ctx.author):
         return True
-    raise commands.CheckFailure("이 명령을 사용할 권한이 없어요. (서버 관리 권한 또는 관리자 역할 필요)")
+    raise commands.CheckFailure("이 명령을 사용할 권한이 없어요. (서버 관리 권한 또는 운영진 역할 필요)")
 
 
 @bot.before_invoke
