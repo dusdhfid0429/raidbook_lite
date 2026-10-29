@@ -115,6 +115,8 @@ DEFAULT_VOLUME = max(1, min(100, int(config.get("default_volume", 50) or 50)))
 MAX_QUEUE = max(1, int(config.get("max_queue", 50) or 50))
 MAX_PLAYLIST = max(1, int(config.get("max_playlist", 30) or 30))
 IDLE_DISCONNECT = max(30, int(config.get("idle_disconnect_seconds", 300) or 300))
+# 듣는 사람이 아무도 없을 때 일시정지 후 이 시간이 지나면 재생 종료·퇴장 (그 사이 누가 들어오면 이어서 재생)
+EMPTY_DISCONNECT = max(10, int(config.get("empty_disconnect_seconds", 60) or 60))
 YOUTUBE_ONLY = bool(config.get("youtube_only", True))
 AUTO_UPDATE = bool(config.get("auto_update_ytdlp", True))
 # 0이면 음성채널 비트레이트에 맞춤 (최소 128kbps)
@@ -146,6 +148,7 @@ class GuildPlayer:
         self.np_message = None           # 현재 재생 메시지
         self.lock = asyncio.Lock()
         self.idle_task = None
+        self.idle_empty = False          # 진행 중인 퇴장 타이머가 '빈 채널' 타이머인지
         self.started_at = 0.0
 
     def voice(self):
@@ -283,14 +286,20 @@ def _cancel_idle(p: GuildPlayer):
     if p.idle_task and not p.idle_task.done():
         p.idle_task.cancel()
     p.idle_task = None
+    p.idle_empty = False
 
 
-def _schedule_idle(p: GuildPlayer):
+def _schedule_idle(p: GuildPlayer, empty: bool = False):
+    """empty=True: 채널이 비어서 거는 타이머(EMPTY_DISCONNECT). 이미 걸려 있으면 다시 걸지 않는다
+    — 다른 사람의 음성 상태 변화마다 타이머가 처음부터 다시 시작되면 안 되므로."""
+    if empty and p.idle_empty and p.idle_task and not p.idle_task.done():
+        return
     _cancel_idle(p)
+    delay = EMPTY_DISCONNECT if empty else IDLE_DISCONNECT
 
     async def _idle():
         try:
-            await asyncio.sleep(IDLE_DISCONNECT)
+            await asyncio.sleep(delay)
         except asyncio.CancelledError:
             return
         vc = p.voice()
@@ -298,9 +307,10 @@ def _schedule_idle(p: GuildPlayer):
             return
         alone = not any(not m.bot for m in vc.channel.members)
         if alone or (not vc.is_playing() and not vc.is_paused()):
-            log.info(f"[자동 퇴장] {vc.channel} — {IDLE_DISCONNECT}초 동안 {'듣는 사람' if alone else '재생'} 없음")
+            log.info(f"[자동 퇴장] {vc.channel} — {delay}초 동안 {'듣는 사람' if alone else '재생'} 없음")
             await _shutdown(p)
     p.idle_task = asyncio.create_task(_idle())
+    p.idle_empty = empty
 
 
 async def _shutdown(p: GuildPlayer):
@@ -743,7 +753,7 @@ async def on_voice_state_update(member: discord.Member, before, after):
         if vc.is_playing():
             vc.pause()
             await _refresh_np(p)
-        _schedule_idle(p)   # 아무도 없으면 일정 시간 뒤 퇴장
+        _schedule_idle(p, empty=True)   # 아무도 없으면 EMPTY_DISCONNECT(기본 1분) 뒤 재생 종료·퇴장
     elif before.channel != vc.channel and after.channel == vc.channel:
         _cancel_idle(p)
         if vc.is_paused() and p.current:
