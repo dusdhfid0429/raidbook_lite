@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""RaidBook Lite — Watchdog GUI(RaidBook.exe) + Boss Bot(RaidBook_Boss_Bot.exe) + Music Bot(RaidBook_Music_Bot.exe) 빌드"""
+"""RaidBook Lite — Watchdog GUI(RaidBook.exe) + Boss Bot + Music Bot + TTS Bot(RaidBook_TTS_Bot.exe) 빌드"""
 import os
 from PyInstaller.utils.hooks import collect_data_files
 
@@ -9,8 +9,8 @@ DATAS = [
     ('version.py', '.'),
     ('config_helper.py', '.'),
 ]
-EXCLUDES = ['matplotlib', 'numpy', 'pandas', 'scipy', 'IPython', 'jupyter', 'edge_tts']
-NO_VOICE = ['nacl', 'davey']   # 음성 재생은 Music Bot에만 필요
+EXCLUDES = ['matplotlib', 'numpy', 'pandas', 'scipy', 'IPython', 'jupyter']
+NO_VOICE = ['nacl', 'davey', 'edge_tts']   # 음성 재생은 Music/TTS Bot에만 필요
 ICON = 'Images/Icon/WatchDog.ico' if os.path.exists('Images/Icon/WatchDog.ico') else None
 VERSION_FILE = 'version_info.txt' if os.path.exists('version_info.txt') else None
 
@@ -43,4 +43,9 @@ build('RaidBook_Music_Bot.py', 'RaidBook_Music_Bot', [
     # _cffi_backend: nacl._sodium이 C 단에서 import해 분석에 안 잡힘 → 빠지면 'PyNaCl library needed' 오류
     'discord', 'discord.ext.commands', 'discord.voice_client', 'nacl', 'nacl.secret', 'nacl.utils', '_cffi_backend', 'davey',
     'RaidBook_music', 'RaidBook_storage', 'RaidBook_common', 'config_helper',
+], voice=True)
+# TTS 봇 — 음성(PyNaCl·davey·opus) + edge_tts(마이크로소프트 음성 합성, 인터넷 필요). ffmpeg.exe는 음악 봇과 같이 씀
+build('RaidBook_TTS_Bot.py', 'RaidBook_TTS_Bot', [
+    'discord', 'discord.ext.commands', 'discord.voice_client', 'nacl', 'nacl.secret', 'nacl.utils', '_cffi_backend', 'davey',
+    'edge_tts', 'RaidBook_tts', 'RaidBook_music', 'RaidBook_channel_setup', 'RaidBook_storage', 'RaidBook_common', 'config_helper',
 ], voice=True)

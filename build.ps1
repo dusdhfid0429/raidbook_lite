@@ -1,4 +1,4 @@
-# RaidBook Lite 빌드 — PyInstaller(exe 3개) + ffmpeg.exe + Inno Setup(설치파일)
+# RaidBook Lite 빌드 — PyInstaller(exe 4개) + ffmpeg.exe + Inno Setup(설치파일)
 # 사용: .\build.ps1 [-SkipInstaller]   (GitHub Actions도 이 스크립트를 그대로 사용)
 param([switch]$SkipInstaller)
 $ErrorActionPreference = "Stop"
@@ -27,14 +27,16 @@ if ($LASTEXITCODE -ne 0) { throw "PyInstaller 실패 ($LASTEXITCODE)" }
 $Ffmpeg = (python -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())").Trim()
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path $Ffmpeg)) { throw "ffmpeg 찾기 실패 (pip install imageio-ffmpeg)" }
 Copy-Item $Ffmpeg "dist\ffmpeg.exe" -Force
-# 음악 봇 exe에 음성 라이브러리(PyNaCl·davey·opus)가 실제로 들어갔는지 실행해서 확인
+# 음악/TTS 봇 exe에 음성 라이브러리(PyNaCl·davey·opus, TTS는 edge_tts까지)가 실제로 들어갔는지 실행해서 확인
 # (창 없는 exe라 Start-Process -Wait로 종료를 기다리고 출력은 파일로 받는다)
-$selfOut = Join-Path $env:TEMP "raidbook_music_selftest.txt"
-$p = Start-Process -FilePath "dist\RaidBook_Music_Bot.exe" -ArgumentList "--selftest" -Wait -PassThru -NoNewWindow -RedirectStandardOutput $selfOut
-$self = if (Test-Path $selfOut) { (Get-Content $selfOut -Raw -Encoding UTF8) } else { "" }
-Write-Host "  Music Bot $("$self".Trim())"
-if ($p.ExitCode -ne 0) { throw "Music Bot selftest 실패 ($($p.ExitCode)): $self" }
-foreach ($exe in @("RaidBook.exe", "RaidBook_Boss_Bot.exe", "RaidBook_Music_Bot.exe", "ffmpeg.exe")) {
+foreach ($bot in @("Music", "TTS")) {
+    $selfOut = Join-Path $env:TEMP "raidbook_${bot}_selftest.txt"
+    $p = Start-Process -FilePath "dist\RaidBook_${bot}_Bot.exe" -ArgumentList "--selftest" -Wait -PassThru -NoNewWindow -RedirectStandardOutput $selfOut
+    $self = if (Test-Path $selfOut) { (Get-Content $selfOut -Raw -Encoding UTF8) } else { "" }
+    Write-Host "  $bot Bot $("$self".Trim())"
+    if ($p.ExitCode -ne 0) { throw "$bot Bot selftest 실패 ($($p.ExitCode)): $self" }
+}
+foreach ($exe in @("RaidBook.exe", "RaidBook_Boss_Bot.exe", "RaidBook_Music_Bot.exe", "RaidBook_TTS_Bot.exe", "ffmpeg.exe")) {
     if (-not (Test-Path "dist\$exe")) { throw "dist\$exe 생성 안 됨" }
     Write-Host ("  ✓ {0} ({1:N1} MB)" -f $exe, ((Get-Item "dist\$exe").Length / 1MB)) -ForegroundColor Green
 }

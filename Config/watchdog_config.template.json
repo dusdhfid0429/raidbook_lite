@@ -44,6 +44,11 @@
       "name": "Music Bot",
       "script": "RaidBook_Music_Bot.py",
       "enabled": true
+    },
+    {
+      "name": "TTS Bot",
+      "script": "RaidBook_TTS_Bot.py",
+      "enabled": true
     }
   ]
 }

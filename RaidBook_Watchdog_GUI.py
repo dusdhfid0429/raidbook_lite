@@ -2132,15 +2132,16 @@ class WatchdogApp(tk.Tk):
 
     # ── 초기 설정 마법사 ─────────────────────────────────────────────────────
     def _show_setup_wizard(self, on_complete, edit_mode=False):
-        """config 미설정 시 표시되는 2단계(Watchdog·Boss Bot) 초기 설정 마법사.
+        """config 미설정 시 표시되는 3단계(Watchdog·Boss Bot·TTS Bot) 초기 설정 마법사. TTS 토큰은 선택.
 
         edit_mode=True 이면 실행 중 설정 수정 용도로 열린다:
         닫기(X/Esc)로 취소할 수 있고, 저장 시 on_complete가 봇을 재시작한다.
         """
 
         _BOSS_PATH   = get_config_path("boss_config.json")
+        _TTS_PATH    = get_config_path("tts_config.json")
 
-        for _path in (CONFIG_PATH, _BOSS_PATH):
+        for _path in (CONFIG_PATH, _BOSS_PATH, _TTS_PATH):
             ensure_config_from_template(_path)
 
         def _load(path):
@@ -2152,6 +2153,7 @@ class WatchdogApp(tk.Tk):
 
         wdog_c   = _load(CONFIG_PATH)
         boss_c   = _load(_BOSS_PATH)
+        tts_c    = _load(_TTS_PATH)
 
         # ── 창 ────────────────────────────────────────────────────────────────
         win = tk.Toplevel(self)
@@ -2201,6 +2203,7 @@ class WatchdogApp(tk.Tk):
         STEP_META = [
             ("Watchdog",   "\U0001f6e1"),
             ("Boss Bot",   "⚔"),
+            ("TTS Bot",    "\U0001f50a"),
         ]
         prog_frame = tk.Frame(win, bg=_C["panel"])
         prog_frame.pack(fill="x")
@@ -2286,6 +2289,7 @@ class WatchdogApp(tk.Tk):
         v = {
             "wdog_token":     _sv(wdog_c.get("token", "")),
             "boss_token":     _sv(boss_c.get("token", "")),
+            "tts_token":      _sv(tts_c.get("token", "")),
         }
 
         # ── 위젯 헬퍼        }
@@ -2351,6 +2355,15 @@ class WatchdogApp(tk.Tk):
         _field(s1, "봇 토큰",       v["boss_token"],  hide=True,
                tip="Boss Bot Discord 봇 토큰")
 
+        # Step 2 — TTS Bot (선택)
+        s2 = _mk()
+        _step_header(s2, "\U0001f50a", "TTS Bot 설정 (선택)",
+                     "채팅에 #내용 을 쓰면 음성채널에서 읽어 주는 봇입니다. 쓰지 않으면 비워 두세요.\n"
+                     "서버에 따로 추가한 TTS 전용 봇의 토큰을 넣어야 합니다 (Boss Bot 토큰과 달라야 함).\n"
+                     "TTS 봇의 Bot 탭에서 Message Content Intent를 꼭 켜 주세요. 'tts' 채널은 자동으로 만듭니다.")
+        _field(s2, "봇 토큰",       v["tts_token"],  required=False, hide=True,
+               tip="TTS 전용 Discord 봇 토큰 (선택)")
+
         # ── 스텝 전환 로직 ────────────────────────────────────────────────────
         cur = [0]
 
@@ -2407,6 +2420,12 @@ class WatchdogApp(tk.Tk):
                 _tk("wdog_token",     "Watchdog 토큰")
             elif idx == 1:
                 _tk("boss_token",     "Boss Bot 토큰")
+            elif idx == 2:
+                tts = v["tts_token"].get().strip()
+                if tts:
+                    _tk("tts_token",  "TTS Bot 토큰")
+                    if tts in (v["boss_token"].get().strip(), v["wdog_token"].get().strip()):
+                        errors.append("[TTS Bot 토큰] 다른 봇과 같은 토큰입니다. TTS 전용 봇의 토큰을 넣어 주세요.")
             return errors
 
         def _save_all():
@@ -2439,6 +2458,13 @@ class WatchdogApp(tk.Tk):
                 boss["token"]              = _str("boss_token")
                 with open(_BOSS_PATH, "w", encoding="utf-8") as f:
                     json.dump(boss, f, ensure_ascii=False, indent=4)
+
+                # tts_config.json (선택 — 비어 있으면 TTS 봇은 대기만 함)
+                tts = _load(_TTS_PATH)
+                if tts.get("token", "") != _str("tts_token"):
+                    tts["token"]           = _str("tts_token")
+                    with open(_TTS_PATH, "w", encoding="utf-8") as f:
+                        json.dump(tts, f, ensure_ascii=False, indent=4)
 
                 # 전역 변수 즉시 반영 (run_bot/_wdog_bot 등은 공유 코어 모듈에 있으므로 그쪽도 갱신)
                 WATCHDOG_TOKEN   = _str("wdog_token")
