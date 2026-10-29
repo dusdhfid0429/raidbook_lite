@@ -159,17 +159,19 @@ def test_pending_entries_and_embed():
     running = {"lots": [ba.make_lot("목걸이", "", 100, 10, 5)], "status": "active", "current": None, "created_at": "3"}
     ba.board_start_next(running, 0)
     entries = ba.pending_entries(loot, {new_mid: [sold, flop], old_mid: [running]}, {new_mid: ["엘릭서"]})
-    assert len(entries) == 2                                              # 기간 제한 없음 — 10일 전 알림도 남음
+    assert len(entries) == 1                                              # 경매장에 올라간 목걸이는 목록에 없음
     new = next(e for e in entries if e["mid"] == new_mid)
     assert [(o["label"], o["note"]) for o in new["options"]] == [
         ("반지 (1/2)", "유찰 — 다시 경매"), ("반지 (2/2)", "경매 전")]  # 낙찰된 집행검·제외한 엘릭서 없음
     pairs = ba.pending_items(entries)
-    assert [ba.pending_status(o) for _, o in pairs] == ["유찰", "경매 전", "진행 중"]   # 상태순
+    assert [ba.pending_status(o) for _, o in pairs] == ["유찰", "경매 전"]   # 상태순
     assert [o["label"] for _, o in ba.pending_items(entries, selectable=True)] == ["반지 (1/2)", "반지 (2/2)"]
     e = ba.build_pending_embed(entries, alert_link=lambda m: f"https://x/{m}")
     d = e.description
-    assert d.index("⚪ 유찰") < d.index("⏳ 경매 전") < d.index("🔨 진행 중")
-    assert "반지 (1/2) — [드레이크 18:00" in d and "목걸이 — [카스파 17:00" in d
+    assert d.index("⚪ 유찰") < d.index("⏳ 경매 전") and "진행 중" not in d
+    assert "반지 (1/2) — [드레이크 18:00" in d and "목걸이" not in d
+    old_only = ba.pending_entries(loot, {}, {new_mid: ["집행검", "반지 (1/2)", "반지 (2/2)", "엘릭서"]})
+    assert [o["label"] for e in old_only for o in e["options"]] == ["목걸이"]   # 기간 제한 없음 — 10일 전 알림도 남음
     assert "김" not in d and "100" not in d                               # 공개 목록엔 이름·상태만
 
 

@@ -980,7 +980,7 @@ def snowflake_time(message_id):
 
 
 def pending_entries(loot_by_mid, boards_by_mid, excluded=None, *, since=None):
-    """경매 대기 목록 — 보스 알림별로 아직 낙찰되지 않은 아이템 (경매 전·유찰·진행 중).
+    """경매 대기 목록 — 보스 알림별로 아직 낙찰되지 않은 아이템 (경매 전·유찰). 경매장에 올라가 있는 건 뺀다.
     기간 제한 없음: 낙찰되거나 관리자가 🙈로 빼기 전까지 남는다.
     loot_by_mid: {mid: {boss_name, boss_time, loot_text}}, boards_by_mid: {mid: [진행판...]},
     excluded: {mid: [label...]} (목록에서 뺀 아이템). since 지정 시 그 이전 알림은 제외. 최신 알림 먼저."""
@@ -993,8 +993,7 @@ def pending_entries(loot_by_mid, boards_by_mid, excluded=None, *, since=None):
         if since is not None and when < since:
             continue
         hide = set(excluded.get(str(mid)) or [])
-        opts = [o for o in auction_options(info.get("loot_text", ""), boards_by_mid.get(str(mid), []),
-                                           include_running=True)
+        opts = [o for o in auction_options(info.get("loot_text", ""), boards_by_mid.get(str(mid), []))
                 if o["label"] not in hide]
         if opts:
             out.append({"mid": str(mid), "boss_name": info.get("boss_name", ""),
