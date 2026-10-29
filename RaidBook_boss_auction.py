@@ -253,6 +253,10 @@ class BossAuction:
         # 진행판 생성·아이템 마감 등 경매 대기 목록이 바뀔 때 호출 (동기 콜백, 예약만 해야 함)
         self.on_change = None
         self.board_defaults = dict(DEFAULT_BOARD_DEFAULTS)   # 재경매 입력에서 숫자 생략 시
+        self.settlements = SettlementStore(os.path.join(data_dir, "auction_settlements.json"), logger)
+        self.settlement_config = dict(DEFAULT_SETTLEMENT)   # config "settlement" 블록
+        self.get_names = None   # () → {uid: 표시 이름}
+        self._settle_lock = asyncio.Lock()
 
     def click_ts(self, interaction):
         """버튼을 누른 순간의 Discord 시각(unix). PC 시계 차이도 함께 갱신."""
@@ -339,7 +343,8 @@ class BossAuction:
         until = self.lock_until(rec)
         locked = until is not None and self.discord_now() < until
         if (rec or {}).get("type") == "board":
-            return BoardView(self, state=board_state(rec), relist=board_can_relist(rec), locked=locked)
+            return BoardView(self, state=board_state(rec), relist=board_can_relist(rec), locked=locked,
+                             settle=board_can_settle(rec), settled=bool(rec.get("settled_at")))
         return AuctionView(self, state=(rec or {}).get("status", "closed"), locked=locked)
 
     async def load_allowed(self, source_message_id):
@@ -437,6 +442,45 @@ class BossAuction:
                       f"{int(rec.get('current_price') or 0):,} | 입찰 {rec.get('bid_count', 0)}회 | msg {mid}")
         return rec
 
+    async def settle_board(self, mid, *, by=""):
+        """💰 정산 — 반환: (정산 기록, 오류문, 이미 정산했는지). 한 진행판은 한 번만 만든다 (다시 누르면 저장된 기록)."""
+        async with self._settle_lock:
+            existing = self.settlements.get(mid)
+            if existing:
+                return existing, None, True
+            board = self.store.get(mid)
+            if not board_can_settle(board):
+                return None, "낙찰된 아이템이 있는 끝난 경매만 정산할 수 있어요.", False
+            src = board.get("source_message_id")
+            attendees = []
+            if src and self.get_attendees is not None:
+                try:
+                    attendees = await asyncio.to_thread(self.get_attendees, src)
+                except Exception as e:
+                    return None, f"참석자 조회에 실패했어요 ({type(e).__name__}).", False
+            names = {}
+            if self.get_names is not None:
+                try:
+                    names = self.get_names() or {}
+                except Exception:
+                    names = {}
+            try:
+                rec = compute_settlement(board, attendees, self.settlement_config, names=names)
+            except ValueError as e:
+                return None, str(e), False
+            now = datetime.now().isoformat(timespec="seconds")
+            rec.update({"board_message_id": str(mid), "source_message_id": str(src) if src else None,
+                        "boss_name": board.get("boss_name", ""), "boss_time": board.get("boss_time", ""),
+                        "created_at": now, "created_by": by, "status": "created"})
+            self.settlements.save(mid, rec)
+            async with self.lock:
+                fresh = self.store.get(mid) or board
+                fresh["settled_at"] = now
+                self.safe_save(mid, fresh)
+        self.log.info(f"[경매 정산] msg {mid} | 합계 {rec['total']:,} | 혈비 {rec['guild_fee']:,} 운영진 {rec['operations']:,} "
+                      f"참석자 {rec['attendee_count']}명 × {rec['per_attendee']:,} | by {by}")
+        return rec, None, False
+
     async def watch_overdue(self, interval=3.0, slack=3.0):
         """마감 시각이 지났는데 마감 처리가 안 된 경매를 찾아 마감 (타이머가 취소·유실돼도 카운트가 멈춘 채 남지 않게)."""
         while True:
@@ -469,8 +513,9 @@ class BossAuction:
                 if board_state(rec) == "active":
                     self._schedule_board(mid, rec)
                     self.log.info(f"[진행판 복구] {rec.get('boss_name')} {rec.get('boss_time')} | msg {mid}")
-                elif board_can_relist(rec) and not rec.get("relist_button"):
-                    # 이전 버전에서 끝난 진행판에 🔁 유찰 재경매 버튼을 한 번 붙여 준다
+                elif ((board_can_relist(rec) and not rec.get("relist_button"))
+                      or (board_can_settle(rec) and not rec.get("settle_button"))):
+                    # 이전 버전에서 끝난 진행판에 🔁 유찰 재경매 / 💰 정산 버튼을 한 번 붙여 준다
                     try:
                         ch = self.bot.get_channel(int(rec["channel_id"])) or await self.bot.fetch_channel(int(rec["channel_id"]))
                         msg = await ch.fetch_message(int(mid))
@@ -478,6 +523,7 @@ class BossAuction:
                     except Exception as e:
                         self.log.info(f"[진행판 재경매 버튼 추가 실패] {mid}: {type(e).__name__}: {e}")
                     rec["relist_button"] = True
+                    rec["settle_button"] = True
                     self.store.save(mid, rec)
             elif rec.get("status") == "active":
                 self._schedule_close(mid, rec)
@@ -1108,6 +1154,99 @@ def board_unsold_lots(board):
             if lot.get("status") == "cancelled" or (lot.get("status") == "closed" and not lot.get("bidder_id"))]
 
 
+DEFAULT_SETTLEMENT = {"guild_fee_pct": 10, "operations_pct": 30, "attendee_pct": 60}
+
+
+def settlement_ratios(cfg):
+    """config settlement 블록 → (혈비%, 운영진%, 참석자%), 합이 100이 아니면 ValueError."""
+    cfg = dict(DEFAULT_SETTLEMENT, **(cfg or {}))
+    g, o, a = (float(cfg.get(k) or 0) for k in ("guild_fee_pct", "operations_pct", "attendee_pct"))
+    if min(g, o, a) < 0 or abs(g + o + a - 100) > 1e-9:
+        raise ValueError(f"정산 비율 합이 100%가 아니에요 (혈비 {g:g}% + 운영진 {o:g}% + 참석자 {a:g}% = {g + o + a:g}%)")
+    return g, o, a
+
+
+def board_sold_lots(board):
+    return [x for x in (board or {}).get("lots") or [] if x.get("status") == "closed" and x.get("bidder_id")]
+
+
+def board_can_settle(board):
+    """💰 정산 버튼 노출 — 진행판이 끝났고 낙찰된 아이템이 하나라도 있을 때 (진행 중·전부 유찰이면 숨김)."""
+    return bool(board) and board.get("status") == "closed" and bool(board_sold_lots(board))
+
+
+def compute_settlement(board, attendees, cfg, *, names=None):
+    """낙찰금 합계를 혈비/운영진/참석자 비율로 나누고 참석자 몫을 인원수로 나눈다 (정수, 원 단위 절사).
+    나누어떨어지지 않는 나머지(비율 절사·인당 절사)는 혈비에 더해 합계가 낙찰금과 정확히 같게 한다."""
+    g, o, a = settlement_ratios(cfg)
+    names = names or {}
+    lots = board_sold_lots(board)
+    total = sum(int(x.get("current_price") or 0) for x in lots)
+    uids = []
+    for u in attendees or []:
+        if str(u) not in uids:
+            uids.append(str(u))
+    if not uids:
+        raise ValueError("이 보스탐의 참석자를 찾을 수 없어 참석자 분배를 계산할 수 없어요.")
+    operations = int(total * o // 100)
+    attendee_pool = int(total * a // 100)
+    per = attendee_pool // len(uids)
+    guild_fee = total - operations - per * len(uids)   # 혈비 = 비율분 + 절사 나머지
+    return {
+        "total": total,
+        "ratios": {"guild_fee_pct": g, "operations_pct": o, "attendee_pct": a},
+        "guild_fee": guild_fee,
+        "guild_fee_base": int(total * g // 100),
+        "operations": operations,
+        "attendee_pool": attendee_pool,
+        "attendee_count": len(uids),
+        "per_attendee": per,
+        "remainder_to_guild": guild_fee - int(total * g // 100),
+        "lots": [{"label": lot_label(x), "winner_uid": str(x.get("bidder_id")), "winner_name": x.get("bidder_name", ""),
+                  "price": int(x.get("current_price") or 0)} for x in lots],
+        "attendees": [{"uid": u, "name": names.get(u, u), "amount": per} for u in uids],
+    }
+
+
+def settlement_summary_text(rec, currency=""):
+    """관리자 전용(ephemeral) 정산 요약 — 금액 포함."""
+    unit = f" {currency}" if currency else ""
+    r = rec["ratios"]
+    lines = [f"💰 **정산 {'완료' if rec.get('created_at') else '미리보기'}** — {rec.get('boss_name', '')} {rec.get('boss_time', '')}".rstrip(),
+             "낙찰: " + ", ".join(f"{x['label']} {x['winner_name']} {x['price']:,}" for x in rec["lots"]),
+             f"합계 **{rec['total']:,}{unit}**",
+             f"· 혈비 {r['guild_fee_pct']:g}% → **{rec['guild_fee']:,}**"
+             + (f" (나머지 {rec['remainder_to_guild']:,} 포함)" if rec.get("remainder_to_guild") else ""),
+             f"· 운영진 {r['operations_pct']:g}% → **{rec['operations']:,}**",
+             f"· 참석자 {r['attendee_pct']:g}% → {rec['attendee_pool']:,} ÷ {rec['attendee_count']}명 = 인당 **{rec['per_attendee']:,}**"]
+    if rec.get("created_at"):
+        lines.append(f"-# {rec['created_at']} · {rec.get('created_by', '')} · 정산 데이터 저장됨")
+    return "\n".join(lines)[:1990]
+
+
+class SettlementStore:
+    """Data/auction_settlements.json — 진행판 메시지ID별 정산 결과 (한 번 만들면 다시 누를 때 그대로 보여 준다)."""
+
+    def __init__(self, path, logger=None):
+        self.path = path
+        self.log = logger
+
+    def load(self):
+        if not os.path.exists(self.path):
+            return {}
+        with open(self.path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+
+    def get(self, mid):
+        return self.load().get(str(mid))
+
+    def save(self, mid, rec):
+        data = self.load()
+        data[str(mid)] = rec
+        write_json_atomic(self.path, data, self.log)
+
+
 def board_can_relist(board):
     """🔁 유찰 재경매 버튼 활성 여부 — 진행판이 끝났고 유찰 아이템이 있을 때."""
     return bool(board) and board.get("status") == "closed" and bool(board_unsold_lots(board))
@@ -1266,10 +1405,11 @@ class BoardView(ui.View):
     """경매 진행판 버튼 (persistent): ▶️ 경매시작 (관리자, 아이템마다) / 🙋 입찰 / ⏹️ 종료 (관리자)
     / 🔁 유찰 재경매 (관리자, 끝난 뒤 유찰 아이템만 새 진행판으로)."""
 
-    def __init__(self, auction: BossAuction, state="waiting", relist=False, locked=False):
+    def __init__(self, auction: BossAuction, state="waiting", relist=False, locked=False, settle=None, settled=False):
+        """settle=None: 재시작 복구 등록용 — 버튼을 모두 둔다. False면 💰 정산 버튼을 아예 뺀다 (진행 중·유찰)."""
         super().__init__(timeout=None)
         self.auction = auction
-        for child in self.children:
+        for child in list(self.children):
             cid = getattr(child, "custom_id", "")
             if cid == "boss_board_start":
                 child.disabled = state != "waiting"
@@ -1281,6 +1421,11 @@ class BoardView(ui.View):
                 child.disabled = state == "closed"
             elif cid == "boss_board_relist":
                 child.disabled = not relist
+            elif cid == "boss_board_settle":
+                if settle is False:
+                    self.remove_item(child)
+                elif settled:
+                    child.label, child.style = "정산 완료", discord.ButtonStyle.secondary
 
     @ui.button(label="경매시작", emoji="▶️", style=discord.ButtonStyle.primary, custom_id="boss_board_start")
     async def start_btn(self, interaction: discord.Interaction, button: ui.Button):
@@ -1389,3 +1534,25 @@ class BoardView(ui.View):
                       "countdown_sec": first["countdown_sec"]},
             boss_name=board.get("boss_name", ""), boss_time=board.get("boss_time", ""),
             source_message_id=src, recheck=_recheck))
+
+    @ui.button(label="정산", emoji="💰", style=discord.ButtonStyle.success, custom_id="boss_board_settle")
+    async def settle_btn(self, interaction: discord.Interaction, button: ui.Button):
+        """낙찰된 진행판의 낙찰금을 정산 비율대로 나눠 정산 데이터를 만든다 (관리자, 결과는 본인만 보이게)."""
+        a = self.auction
+        if not a.is_admin(interaction.user):
+            await interaction.response.send_message("⛔ 관리자만 정산할 수 있어요.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        mid = interaction.message.id
+        rec, err, already = await a.settle_board(mid, by=interaction.user.display_name)
+        if err:
+            await interaction.followup.send(f"⚠️ {err}", ephemeral=True)
+            return
+        head = "이미 정산한 건이에요. 저장된 정산 내용:\n" if already else ""
+        await interaction.followup.send((head + settlement_summary_text(rec, a.currency))[:1990], ephemeral=True)
+        if not already:
+            board = a.store.get(mid)
+            try:
+                await interaction.message.edit(view=a.view_for(board))
+            except Exception as e:
+                a.log.info(f"[정산 버튼 갱신 실패] {mid}: {type(e).__name__}: {e}")

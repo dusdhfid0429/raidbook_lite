@@ -240,6 +240,15 @@ _file = DailyFileHandler(LOG_DIR, "RaidBook_boss_Bot")
 _file.setFormatter(_formatter)
 log.addHandler(_file)
 
+# 이전 버전 설치판 config에는 정산 비율이 없다 — 기본값을 한 번 써 넣어 운영진이 바로 고칠 수 있게 한다
+if "settlement" not in config:
+    config["settlement"] = {"guild_fee_pct": 10, "operations_pct": 30, "attendee_pct": 60}
+    try:
+        write_json_atomic(CONFIG_PATH, config, log)
+        log.info("[설정] boss_config.json에 정산 비율(settlement) 기본값을 추가했어요: 혈비 10% / 운영진 30% / 참석자 60%")
+    except Exception as e:
+        log.info(f"[설정] 정산 비율 기본값 저장 실패 (기본값으로 동작): {e}")
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -3236,6 +3245,8 @@ boss_auction = BossAuction(bot, channel_id=AUCTION_CHANNEL_ID, data_dir=DATA_DIR
 boss_auction.on_board_finished = _apply_board_results
 boss_auction.on_change = lambda: schedule_pending_refresh()
 boss_auction.board_defaults = dict(AUCTION_DEFAULTS)
+boss_auction.get_names = lambda: _load_id_to_name_mapping()
+boss_auction.settlement_config = dict(config.get("settlement") or {})
 
 
 @bot.check

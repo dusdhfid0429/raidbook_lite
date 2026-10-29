@@ -192,6 +192,58 @@ def test_bid_history_and_deadline_order():
     assert any(f.name.startswith("📜 최근 입찰") for f in e.fields)
 
 
+def test_settlement_compute_and_button():
+    import asyncio
+    import tempfile
+
+    board = {"type": "board", "lots": [ba.make_lot("집행검", "", 100, 10, 5), ba.make_lot("반지", "", 100, 10, 5)],
+             "status": "active", "current": None, "source_message_id": "555", "boss_name": "카스파", "boss_time": "18:00"}
+    _finish(board, [("1", "김", 1_000_003), None])          # 집행검 낙찰, 반지 유찰
+    rec = ba.compute_settlement(board, ["1", "2", "3", "2"], {"guild_fee_pct": 10, "operations_pct": 30, "attendee_pct": 60})
+    assert rec["total"] == 1_000_003 and rec["attendee_count"] == 3   # 중복 참석자 1번만
+    assert rec["operations"] == 300_000 and rec["attendee_pool"] == 600_001 and rec["per_attendee"] == 200_000
+    assert rec["guild_fee"] + rec["operations"] + rec["per_attendee"] * 3 == rec["total"]   # 자투리는 혈비로
+    assert [x["label"] for x in rec["lots"]] == ["집행검"]                                   # 유찰은 정산 제외
+    try:
+        ba.compute_settlement(board, ["1"], {"guild_fee_pct": 10, "operations_pct": 30, "attendee_pct": 50})
+        raise AssertionError("합 90% 통과")
+    except ValueError:
+        pass
+
+    class _Log:
+        def info(self, *_):
+            pass
+
+    a = ba.BossAuction(None, channel_id=1, data_dir=tempfile.mkdtemp(), is_admin=lambda u: True, logger=_Log(),
+                       get_attendees=lambda src: ["1", "2", "3"] if src == "555" else [])
+    ids = lambda v: [getattr(c, "custom_id", "") for c in v.children]
+    flop = {"type": "board", "lots": [ba.make_lot("목걸이", "", 100, 10, 5)], "status": "active", "current": None}
+    _finish(flop, [None])
+    running = {"type": "board", "lots": [ba.make_lot("귀걸이", "", 100, 10, 5)], "status": "active", "current": None}
+    ba.board_start_next(running, 0)
+    assert "boss_board_settle" not in ids(a.view_for(flop))       # 유찰만 → 숨김
+    assert "boss_board_settle" not in ids(a.view_for(running))    # 진행 중 → 숨김
+    assert "boss_board_settle" in ids(a.view_for(board))          # 낙찰 있음 → 노출
+    assert "boss_board_settle" in ids(ba.BoardView(a))            # 재시작 복구 등록용엔 항상 있음
+    a.store.save(9, board)
+    a.store.save(8, flop)
+
+    async def run():
+        r, err, already = await a.settle_board(9, by="관리자")
+        assert err is None and not already
+        r2, err2, already2 = await a.settle_board(9, by="관리자")
+        assert already2 and r2["created_at"] == r["created_at"]   # 두 번 눌러도 한 번만 생성
+        _, err3, _ = await a.settle_board(8)
+        assert err3                                                 # 유찰 진행판은 정산 불가
+        return r
+
+    r = asyncio.run(run())
+    assert r["attendee_count"] == 3 and r["guild_fee"] + r["operations"] + r["per_attendee"] * 3 == r["total"]
+    assert a.settlements.get(9)["board_message_id"] == "9"
+    btn = next(c for c in a.view_for(a.store.get(9)).children if getattr(c, "custom_id", "") == "boss_board_settle")
+    assert btn.label == "정산 완료"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
