@@ -156,15 +156,21 @@ def test_pending_entries_and_embed():
     _finish(sold, [("1", "김", 100)])
     flop = {"lots": [ba.make_lot("반지", "1/2", 100, 10, 5)], "status": "active", "current": None, "created_at": "2"}
     _finish(flop, [None])
-    entries = ba.pending_entries(loot, {new_mid: [sold, flop]}, {new_mid: ["엘릭서"]},
-                                 since=datetime.now() - timedelta(days=3))
-    assert len(entries) == 1
-    assert [(o["label"], o["note"]) for o in entries[0]["options"]] == [
-        ("반지 (1/2)", "유찰 — 다시 경매"), ("반지 (2/2)", "경매 전")]
-    e = ba.build_pending_embed(entries, days=3, alert_link=lambda m: f"https://x/{m}")
-    assert "드레이크 18:00" in e.description and "⚪ 반지 (1/2) — 유찰" in e.description
-    assert "김" not in e.description and "100" not in e.description   # 공개 목록엔 이름·상태만
-    assert "목걸이" not in e.description   # 기간 밖
+    running = {"lots": [ba.make_lot("목걸이", "", 100, 10, 5)], "status": "active", "current": None, "created_at": "3"}
+    ba.board_start_next(running, 0)
+    entries = ba.pending_entries(loot, {new_mid: [sold, flop], old_mid: [running]}, {new_mid: ["엘릭서"]})
+    assert len(entries) == 2                                              # 기간 제한 없음 — 10일 전 알림도 남음
+    new = next(e for e in entries if e["mid"] == new_mid)
+    assert [(o["label"], o["note"]) for o in new["options"]] == [
+        ("반지 (1/2)", "유찰 — 다시 경매"), ("반지 (2/2)", "경매 전")]  # 낙찰된 집행검·제외한 엘릭서 없음
+    pairs = ba.pending_items(entries)
+    assert [ba.pending_status(o) for _, o in pairs] == ["유찰", "경매 전", "진행 중"]   # 상태순
+    assert [o["label"] for _, o in ba.pending_items(entries, selectable=True)] == ["반지 (1/2)", "반지 (2/2)"]
+    e = ba.build_pending_embed(entries, alert_link=lambda m: f"https://x/{m}")
+    d = e.description
+    assert d.index("⚪ 유찰") < d.index("⏳ 경매 전") < d.index("🔨 진행 중")
+    assert "반지 (1/2) — [드레이크 18:00" in d and "목걸이 — [카스파 17:00" in d
+    assert "김" not in d and "100" not in d                               # 공개 목록엔 이름·상태만
 
 
 def test_bid_history_and_deadline_order():

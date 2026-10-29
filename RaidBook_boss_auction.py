@@ -950,16 +950,21 @@ def latest_lots(boards):
     return out
 
 
-def auction_options(loot_text, boards):
+def auction_options(loot_text, boards, *, include_running=False):
     """🔨 경매생성 목록 — 득템 기록 중 아직 경매 안 했거나 유찰된 아이템.
-    낙찰됐거나 진행판에서 대기·진행 중인 아이템은 뺀다. 반환: [{item, unit, label, note}]."""
+    낙찰된 아이템은 뺀다. 진행판에서 대기·진행 중인 아이템도 빼고, include_running=True면
+    note "진행 중"·running=True로 넣는다 (대기 목록 표시용, 고를 수는 없음). 반환: [{item, unit, label, note}]."""
     latest = latest_lots(boards)
     out = []
     for item, unit in expand_loot_units(loot_text):
         label = f"{item} ({unit})" if unit else item
         lot = latest.get(label)
         st = (lot or {}).get("status")
-        if st in ("pending", "active") or (st == "closed" and lot.get("bidder_id")):
+        if st == "closed" and lot.get("bidder_id"):
+            continue
+        if st in ("pending", "active"):
+            if include_running:
+                out.append({"item": item, "unit": unit, "label": label, "note": "진행 중", "running": True})
             continue
         note = "유찰 — 다시 경매" if st in ("closed", "cancelled") else "경매 전"
         out.append({"item": item, "unit": unit, "label": label, "note": note})
@@ -975,9 +980,10 @@ def snowflake_time(message_id):
 
 
 def pending_entries(loot_by_mid, boards_by_mid, excluded=None, *, since=None):
-    """경매 대기 목록 — 보스 알림별로 아직 경매 전이거나 유찰된 아이템.
+    """경매 대기 목록 — 보스 알림별로 아직 낙찰되지 않은 아이템 (경매 전·유찰·진행 중).
+    기간 제한 없음: 낙찰되거나 관리자가 🙈로 빼기 전까지 남는다.
     loot_by_mid: {mid: {boss_name, boss_time, loot_text}}, boards_by_mid: {mid: [진행판...]},
-    excluded: {mid: [label...]} (목록에서 뺀 아이템). since 이전 알림은 제외. 최신 알림 먼저."""
+    excluded: {mid: [label...]} (목록에서 뺀 아이템). since 지정 시 그 이전 알림은 제외. 최신 알림 먼저."""
     excluded = excluded or {}
     out = []
     for mid, info in loot_by_mid.items():
@@ -987,7 +993,8 @@ def pending_entries(loot_by_mid, boards_by_mid, excluded=None, *, since=None):
         if since is not None and when < since:
             continue
         hide = set(excluded.get(str(mid)) or [])
-        opts = [o for o in auction_options(info.get("loot_text", ""), boards_by_mid.get(str(mid), []))
+        opts = [o for o in auction_options(info.get("loot_text", ""), boards_by_mid.get(str(mid), []),
+                                           include_running=True)
                 if o["label"] not in hide]
         if opts:
             out.append({"mid": str(mid), "boss_name": info.get("boss_name", ""),
@@ -996,24 +1003,47 @@ def pending_entries(loot_by_mid, boards_by_mid, excluded=None, *, since=None):
     return out
 
 
-def build_pending_embed(entries, *, days, alert_link=None):
-    """📌 경매 대기 목록 embed — 이름·상태만 (금액 없음). alert_link: mid → 보스 알림 링크."""
+_PENDING_RANK = {"유찰": 0, "경매 전": 1, "진행 중": 2}
+
+
+def pending_status(opt):
+    return opt["note"].split(" —")[0]
+
+
+def pending_items(entries, *, selectable=False):
+    """대기 목록을 아이템 단위로 펼쳐 상태순(유찰 → 경매 전 → 진행 중), 같은 상태는 아이템 이름순.
+    selectable=True면 진행 중(고를 수 없음)은 뺀다. 반환: [(entry, option)]."""
+    pairs = [(e, o) for e in entries for o in e["options"] if not (selectable and o.get("running"))]
+    pairs.sort(key=lambda p: (_PENDING_RANK.get(pending_status(p[1]), 9), p[1]["item"], p[1]["label"],
+                              -p[0]["when"].timestamp()))
+    return pairs
+
+
+def build_pending_embed(entries, *, days=None, alert_link=None):
+    """📌 경매 대기 목록 embed — 아이템별 상태 (이름·상태만, 금액 없음). alert_link: mid → 보스 알림 링크."""
     embed = discord.Embed(title="📌 경매 대기 목록", color=0x5865f2)
-    lines = []
-    for e in entries:
-        head = f"**{e['boss_name']} {e['boss_time']}** · {e['when'].strftime('%m-%d')}"
+    marks = {"유찰": "⚪", "경매 전": "⏳", "진행 중": "🔨"}
+    pairs = pending_items(entries)
+    lines, shown, last = [], 0, None
+    for e, o in pairs:
+        status = pending_status(o)
+        if status != last:
+            lines.append(f"**{marks.get(status, '•')} {status}**")
+            last = status
+        src = f"{e['boss_name']} {e['boss_time']} · {e['when'].strftime('%m-%d')}"
         if alert_link:
-            head += f" · [알림]({alert_link(e['mid'])})"
-        lines.append(head)
-        for o in e["options"]:
-            mark = "⚪" if o["note"].startswith("유찰") else "⏳"
-            lines.append(f"　{mark} {o['label']} — {o['note'].split(' —')[0]}")
-    desc = "\n".join(lines) or "경매를 기다리는 아이템이 없어요."
-    if len(desc) > 3900:
-        desc = desc[:3900] + "\n…"
-    embed.description = desc
-    count = sum(len(e["options"]) for e in entries)
-    embed.set_footer(text=f"{count}건 · 최근 {days}일 · 아래 목록에서 고르면 경매 생성 (관리자) · ⏳ 경매 전 ⚪ 유찰")
+            src = f"[{src}]({alert_link(e['mid'])})"
+        line = f"　{o['label']} — {src}"
+        if sum(len(x) + 1 for x in lines) + len(line) > 3800:
+            break
+        lines.append(line)
+        shown += 1
+    if shown < len(pairs):
+        lines.append(f"…외 {len(pairs) - shown}건")
+    embed.description = "\n".join(lines) or "경매를 기다리는 아이템이 없어요."
+    pickable = sum(1 for _, o in pairs if not o.get("running"))
+    tail = " (선택 목록은 25건까지)" if pickable > 25 else ""
+    embed.set_footer(text=f"{len(pairs)}건 · 낙찰되면 목록에서 빠져요 · 아래에서 고르면 경매 생성 (관리자){tail}")
     return embed
 
 

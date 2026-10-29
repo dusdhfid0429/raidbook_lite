@@ -52,6 +52,8 @@ from RaidBook_boss_auction import (
     auction_options,
     build_pending_embed,
     pending_entries,
+    pending_items,
+    pending_status,
     board_results_text,
     lots_results_text,
     merge_board_lots,
@@ -1697,7 +1699,6 @@ class ModalOpenView(discord.ui.View):
 #  상태: Data/auction_pending.json {message_id, excluded: {보스알림ID: [label...]}}
 # ══════════════════════════════════════════════════════════════════════════
 PENDING_STATE_PATH = os.path.join(DATA_DIR, "auction_pending.json")
-PENDING_DAYS = max(1, int(config.get("auction_pending_days", 3) or 3))
 PENDING_LIST_ENABLED = LOOT_AUCTION_BUTTON and bool(config.get("auction_pending_list", True))
 _pending_lock = asyncio.Lock()
 _pending_task = None
@@ -1730,8 +1731,8 @@ def _collect_pending_entries():
             boards.setdefault(str(rec["source_message_id"]), []).append(rec)
     for lst in boards.values():
         lst.sort(key=lambda b: b.get("created_at") or "")
-    since = datetime.now() - timedelta(days=PENDING_DAYS)
-    return pending_entries(loot, boards, _load_pending_state().get("excluded") or {}, since=since)
+    # 기간 제한 없음 — 낙찰되거나 🙈로 빼기 전까지 계속 표시
+    return pending_entries(loot, boards, _load_pending_state().get("excluded") or {})
 
 
 def _alert_link(mid):
@@ -1747,14 +1748,11 @@ class PendingListView(discord.ui.View):
     def __init__(self, entries=None):
         super().__init__(timeout=None)
         opts = []
-        for e in entries or []:
-            for o in e["options"]:
-                if len(opts) >= 25:
-                    break
-                opts.append(discord.SelectOption(
-                    label=o["label"][:100], value=f"{e['mid']}|{o['label']}"[:100],
-                    description=f"{e['boss_name']} {e['boss_time']} · {e['when'].strftime('%m-%d')} · "
-                                f"{o['note'].split(' —')[0]}"[:100]))
+        for e, o in pending_items(entries or [], selectable=True)[:25]:
+            opts.append(discord.SelectOption(
+                label=o["label"][:100], value=f"{e['mid']}|{o['label']}"[:100],
+                description=f"{pending_status(o)} · {e['boss_name']} {e['boss_time']} · "
+                            f"{e['when'].strftime('%m-%d')}"[:100]))
         sel = self.pick_select
         if opts:
             sel.options = opts
@@ -1775,7 +1773,7 @@ class PendingListView(discord.ui.View):
         value = (select.values or ["none"])[0]
         mid, _, label = value.partition("|")
         entry = _pending_cache.get(mid)
-        opt = next((o for o in (entry or {}).get("options", []) if o["label"] == label), None)
+        opt = next((o for o in (entry or {}).get("options", []) if o["label"] == label and not o.get("running")), None)
         if entry is None or opt is None:
             await interaction.response.send_message("목록이 바뀌었어요. 🔄 새로고침 후 다시 골라 주세요.", ephemeral=True)
             schedule_pending_refresh()
@@ -1783,7 +1781,7 @@ class PendingListView(discord.ui.View):
 
         async def _recheck():
             entries = await asyncio.to_thread(_collect_pending_entries)
-            return {o["label"] for e in entries if e["mid"] == mid for o in e["options"]}
+            return {o["label"] for e in entries if e["mid"] == mid for o in e["options"] if not o.get("running")}
 
         await interaction.response.send_modal(LotCreateModal(
             boss_auction, title="🔨 경매 생성", options=[opt], defaults=AUCTION_DEFAULTS,
@@ -1800,7 +1798,7 @@ class PendingListView(discord.ui.View):
         if not _is_bot_admin(interaction.user):
             await interaction.response.send_message("⛔ 관리자만 목록을 정리할 수 있어요.", ephemeral=True)
             return
-        opts = [(e, o) for e in _pending_cache.values() for o in e["options"]][:25]
+        opts = pending_items(list(_pending_cache.values()), selectable=True)[:25]
         if not opts:
             await interaction.response.send_message("뺄 아이템이 없어요.", ephemeral=True)
             return
@@ -1845,7 +1843,7 @@ async def refresh_pending_list():
             log.info(f"[경매 대기 목록 계산 실패] {type(e).__name__}: {e}")
             return
         _pending_cache = {e["mid"]: e for e in entries}
-        embed = build_pending_embed(entries, days=PENDING_DAYS, alert_link=_alert_link)
+        embed = build_pending_embed(entries, alert_link=_alert_link)
         view = PendingListView(entries)
         try:
             ch = bot.get_channel(AUCTION_CHANNEL_ID) or await bot.fetch_channel(AUCTION_CHANNEL_ID)
