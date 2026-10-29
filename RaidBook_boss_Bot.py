@@ -2593,9 +2593,15 @@ def _get_boss_image_path(boss_name: str) -> str | None:
     image_val = cfg.get("image", "").strip()
     if not image_val:
         return None
-    # 상대 경로면 스크립트 기준으로 변환
-    path = image_val if os.path.isabs(image_val) else os.path.join(_SCRIPT_DIR, image_val)
-    return path if os.path.exists(path) else None
+    if os.path.isabs(image_val):
+        return image_val if os.path.exists(image_val) else None
+    # 상대 경로: 런타임 폴더(설치판 C:\ProgramData\RaidBook — 업데이트해도 남는 사용자 이미지) 먼저, 없으면 프로그램 폴더
+    for base in (_RUNTIME_DIR, _SCRIPT_DIR):
+        path = os.path.join(base, image_val)
+        if os.path.exists(path):
+            return path
+    log.info(f"[보스 이미지 없음] {boss_name}: {image_val}")
+    return None
 
 
 def _make_boss_file(boss_name: str):
