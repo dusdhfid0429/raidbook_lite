@@ -29,7 +29,7 @@
   "_auction_defaults_comment": "진행판 기본값 '시작가 호가 카운트' — 입력 창에 미리 채워지고, 줄마다 숫자를 생략하면 이 값 사용",
   "auction_channel_id": null,
   "auction_currency": "아데나",
-  "settlement": {"guild_fee_pct": 10, "operations_pct": 30, "attendee_pct": 60},
+  "settlement": {"guild_fee_pct": 30, "operations_pct": 0, "attendee_pct": 70},
   "_settlement_comment": "경매 💰 정산 비율(합 100%) — 혈비/운영진/참석자. 참석자 몫은 그 보스탐 참석자 수로 나눠 인당 분배금. 나누고 남는 자투리는 혈비에 더함",
   "_voice_check_at_spawn_comment": "보스 출현 정각에 음성채널 접속자를 자동 참석 처리.",
   "alert_minutes": 20,

@@ -242,10 +242,10 @@ log.addHandler(_file)
 
 # 이전 버전 설치판 config에는 정산 비율이 없다 — 기본값을 한 번 써 넣어 운영진이 바로 고칠 수 있게 한다
 if "settlement" not in config:
-    config["settlement"] = {"guild_fee_pct": 10, "operations_pct": 30, "attendee_pct": 60}
+    config["settlement"] = {"guild_fee_pct": 30, "operations_pct": 0, "attendee_pct": 70}
     try:
         write_json_atomic(CONFIG_PATH, config, log)
-        log.info("[설정] boss_config.json에 정산 비율(settlement) 기본값을 추가했어요: 혈비 10% / 운영진 30% / 참석자 60%")
+        log.info("[설정] boss_config.json에 정산 비율(settlement) 기본값을 추가했어요: 혈비 30% / 운영진 0% / 참석자 70%")
     except Exception as e:
         log.info(f"[설정] 정산 비율 기본값 저장 실패 (기본값으로 동작): {e}")
 

@@ -1154,7 +1154,7 @@ def board_unsold_lots(board):
             if lot.get("status") == "cancelled" or (lot.get("status") == "closed" and not lot.get("bidder_id"))]
 
 
-DEFAULT_SETTLEMENT = {"guild_fee_pct": 10, "operations_pct": 30, "attendee_pct": 60}
+DEFAULT_SETTLEMENT = {"guild_fee_pct": 30, "operations_pct": 0, "attendee_pct": 70}
 
 
 def settlement_ratios(cfg):
@@ -1217,7 +1217,7 @@ def settlement_summary_text(rec, currency=""):
              f"합계 **{rec['total']:,}{unit}**",
              f"· 혈비 {r['guild_fee_pct']:g}% → **{rec['guild_fee']:,}**"
              + (f" (나머지 {rec['remainder_to_guild']:,} 포함)" if rec.get("remainder_to_guild") else ""),
-             f"· 운영진 {r['operations_pct']:g}% → **{rec['operations']:,}**",
+             *([f"· 운영진 {r['operations_pct']:g}% → **{rec['operations']:,}**"] if r["operations_pct"] else []),
              f"· 참석자 {r['attendee_pct']:g}% → {rec['attendee_pool']:,} ÷ {rec['attendee_count']}명 = 인당 **{rec['per_attendee']:,}**"]
     if rec.get("created_at"):
         lines.append(f"-# {rec['created_at']} · {rec.get('created_by', '')} · 정산 데이터 저장됨")

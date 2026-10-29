@@ -225,6 +225,9 @@ def test_settlement_compute_and_button():
     assert "boss_board_settle" not in ids(a.view_for(running))    # 진행 중 → 숨김
     assert "boss_board_settle" in ids(a.view_for(board))          # 낙찰 있음 → 노출
     assert "boss_board_settle" in ids(ba.BoardView(a))            # 재시작 복구 등록용엔 항상 있음
+    d = ba.compute_settlement(board, ["1", "2", "3"], None)       # 기본 비율 혈비 30 / 운영진 0 / 참석자 70
+    assert d["operations"] == 0 and d["attendee_pool"] == 700_002 and d["per_attendee"] == 233_334
+    assert d["guild_fee"] == 1_000_003 - 233_334 * 3
     a.store.save(9, board)
     a.store.save(8, flop)
 
