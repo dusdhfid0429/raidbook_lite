@@ -28,6 +28,8 @@
   "party_enabled": false,
   "_auction_defaults_comment": "진행판 기본값 '시작가 호가 카운트' — 입력 창에 미리 채워지고, 줄마다 숫자를 생략하면 이 값 사용",
   "auction_channel_id": null,
+  "auction_channel_voice": true,
+  "_auction_channel_voice_comment": "true면 경매장을 음성채널(채팅창에 경매 메시지)로 사용. 예전 텍스트 경매장이면 시작 시 같은 이름의 음성채널을 만들어 옮기고 예전 채널은 남김",
   "auction_currency": "아데나",
   "settlement": {"guild_fee_pct": 30, "operations_pct": 0, "attendee_pct": 70},
   "_settlement_comment": "경매 💰 정산 비율(합 100%) — 혈비/운영진/참석자. 참석자 몫은 그 보스탐 참석자 수로 나눠 인당 분배금. 나누고 남는 자투리는 혈비에 더함",

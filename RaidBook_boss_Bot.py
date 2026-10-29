@@ -290,6 +290,7 @@ LOOT_AUCTION_LEGACY = bool(config.get("loot_auction_legacy", False))
 # 진행판 기본값 "시작가 호가 카운트" (입력 창에 미리 채워짐)
 AUCTION_DEFAULTS = parse_board_defaults(config.get("auction_defaults", ""))
 AUCTION_CHANNEL_ID = int(config.get("auction_channel_id") or 0)
+AUCTION_CHANNEL_VOICE = bool(config.get("auction_channel_voice", True))
 AUCTION_CURRENCY = str(config.get("auction_currency", "아데나") or "")
 # 설정된 채널이 없거나 삭제됐으면 시작 시 "RaidBook" 카테고리에 자동 생성 (채널 관리 권한 필요)
 AUTO_CREATE_CHANNELS = bool(config.get("auto_create_channels", True))
@@ -1861,6 +1862,15 @@ async def refresh_pending_list():
             return
         st = _load_pending_state()
         old_id = st.get("message_id")
+        old_ch_id = int(st.get("channel_id") or ch.id)
+        if old_id and old_ch_id != ch.id:
+            # 경매장 채널이 바뀌었으면(텍스트 → 음성 등) 예전 채널의 목록 메시지를 지우고 새 채널에 다시 올린다
+            try:
+                old_ch = bot.get_channel(old_ch_id) or await bot.fetch_channel(old_ch_id)
+                await (await old_ch.fetch_message(int(old_id))).delete()
+            except Exception:
+                pass
+            old_id = None
         last_id = None
         try:
             async for m in ch.history(limit=1):
@@ -1892,6 +1902,7 @@ async def refresh_pending_list():
         except Exception:
             pass
         st["message_id"] = msg.id
+        st["channel_id"] = ch.id
         _save_pending_state(st)
 
 
@@ -5434,12 +5445,15 @@ async def _ensure_boss_channels():
     if LOOT_ANNOUNCE:
         specs.append(ChannelSpec("loot_channel_id", "전리품"))
     if LOOT_AUCTION_BUTTON:
-        specs.append(ChannelSpec("auction_channel_id", "경매장"))
+        # 경매장은 음성채널(채팅창에 경매 메시지) — 예전 텍스트 경매장이면 같은 이름의 음성채널을 새로 만들어 옮긴다
+        specs.append(ChannelSpec("auction_channel_id", "경매장", voice=AUCTION_CHANNEL_VOICE, convert=True))
     # 음성채널 목록이 비어 있으면 '서버 전체 음성채널' 모드 — 음성채널이 하나도 없을 때만 만든다
     if config.get("voice_channel_ids") or (guild is not None and not guild.voice_channels):
         specs.append(ChannelSpec("voice_channel_ids", "보탐-음성", voice=True, is_list=True))
     try:
-        created, problems = await ensure_channels(bot, CONFIG_PATH, config, specs, log, guild=guild)
+        replaced = {}
+        created, problems = await ensure_channels(bot, CONFIG_PATH, config, specs, log, guild=guild,
+                                                  replaced=replaced)
     except Exception as e:
         log.warning(f"[채널 자동 생성] 오류: {type(e).__name__}: {e}")
         return [f"⚠️ 채널 자동 생성 오류: {e}"]
@@ -5449,7 +5463,19 @@ async def _ensure_boss_channels():
     AUCTION_CHANNEL_ID = int(config.get("auction_channel_id") or 0)
     VOICE_CHANNEL_IDS = [int(c) for c in (config.get("voice_channel_ids") or []) if c]
     boss_auction.channel_id = AUCTION_CHANNEL_ID
-    notes = [f"🆕 <#{ids[0]}> 채널을 만들었어요 (`{key}`)" for key, ids in created.items()]
+    notes = [f"🆕 <#{ids[0]}> 채널을 만들었어요 (`{key}`)" for key, ids in created.items()
+             if key not in replaced]
+    moved = created.get("auction_channel_id")
+    if moved and replaced.get("auction_channel_id"):
+        old_id = replaced["auction_channel_id"]
+        notes.append(f"🔁 경매장을 음성채널 <#{moved[0]}>로 옮겼어요. 예전 <#{old_id}> 채널은 지우지 않고 남겨 뒀어요.")
+        try:
+            old_ch = bot.get_channel(old_id) or await bot.fetch_channel(old_id)
+            await old_ch.send(f"🔁 경매장이 음성채널 <#{moved[0]}>로 옮겨졌어요. 새 경매는 그 채널 채팅에 올라가요. "
+                              f"이 채널에서 진행 중이던 경매는 여기서 그대로 끝까지 진행돼요.")
+        except Exception as e:
+            log.info(f"[경매장 이전 안내 실패] {type(e).__name__}: {e}")
+        schedule_pending_refresh()
     for p in problems:
         log.warning(f"[채널 자동 생성] {p}")
         notes.append(f"⚠️ {p}")

@@ -86,6 +86,31 @@ def test_no_permission_reports():
     assert created == {} and problems
 
 
+def test_convert_text_auction_to_voice():
+    g = FakeGuild()
+    cat = FakeCategory("보탐")
+    old = SimpleNamespace(id=7, name="경매장", guild=g, category=cat, overwrites={}, position=3)
+    g.channels[7] = old
+    fd, path = tempfile.mkstemp(suffix=".json")
+    os.close(fd)
+    config = {"auction_channel_id": 7, "token": "t"}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(config, f)
+    bot = SimpleNamespace(guilds=[g], get_guild=lambda i: g, get_channel=g.get_channel)
+    replaced = {}
+    specs = [ChannelSpec("auction_channel_id", "경매장", voice=True, convert=True)]
+    created, problems = asyncio.run(ensure_channels(bot, path, config, specs, replaced=replaced))
+    with open(path, encoding="utf-8") as f:
+        saved = json.load(f)
+    os.remove(path)
+    assert not problems and replaced == {"auction_channel_id": 7}
+    new_id = created["auction_channel_id"][0]
+    assert saved["auction_channel_id"] == new_id != 7 and saved["token"] == "t"
+    assert [c.name for c in cat.voice_channels] == ["경매장"]     # 같은 이름·카테고리의 음성채널
+    assert 7 in g.channels                                         # 예전 텍스트 채널은 남김
+    assert not g.categories                                        # 변환만 할 땐 RaidBook 카테고리 안 만듦
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

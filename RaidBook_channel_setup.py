@@ -23,6 +23,7 @@ class ChannelSpec:
     voice: bool = False  # 음성채널 여부
     is_list: bool = False  # config 값이 ID 목록인지 (voice_channel_ids)
     private: bool = False  # @everyone 에게 숨김 (관리 채널)
+    convert: bool = False  # 채널은 있는데 종류(텍스트/음성)가 다르면 같은 이름·카테고리·권한으로 새로 만든다 (예전 채널은 남김)
 
 
 def _ids(value):
@@ -50,8 +51,9 @@ def resolve_guild(bot, config, keys):
     return None
 
 
-async def ensure_channels(bot, config_path, config, specs, logger=None, *, guild=None):
+async def ensure_channels(bot, config_path, config, specs, logger=None, *, guild=None, replaced=None):
     """없는 채널을 만들고 config(메모리+파일)를 갱신한다.
+    replaced(dict)를 주면 종류 변환으로 바뀐 키 → 예전 채널 ID를 채워 준다.
 
     Returns: (created: {key: [채널 ID...]}, problems: [str])
     """
@@ -61,12 +63,19 @@ async def ensure_channels(bot, config_path, config, specs, logger=None, *, guild
         problems.append("서버를 정할 수 없어 채널 자동 생성을 건너뜀 (config에 guild_id를 넣어 주세요)")
         return created, problems
 
-    missing = []
+    if replaced is None:
+        replaced = {}
+    missing, old_of = [], {}
     for spec in specs:
         ids = _ids(config.get(spec.key))
-        alive = [cid for cid in ids if guild.get_channel(cid) is not None]
+        alive = [guild.get_channel(cid) for cid in ids if guild.get_channel(cid) is not None]
         if not alive:
             missing.append(spec)
+        elif spec.convert and not spec.is_list:
+            is_voice = isinstance(alive[0], (discord.VoiceChannel, discord.StageChannel))
+            if is_voice != spec.voice:
+                missing.append(spec)
+                old_of[spec.key] = alive[0]
     if not missing:
         return created, problems
 
@@ -78,9 +87,29 @@ async def ensure_channels(bot, config_path, config, specs, logger=None, *, guild
 
     category = discord.utils.get(guild.categories, name=CATEGORY_NAME)
     try:
-        if category is None:
+        if category is None and any(spec.key not in old_of for spec in missing):
             category = await guild.create_category(CATEGORY_NAME, reason="RaidBook 채널 자동 생성")
         for spec in missing:
+            old = old_of.get(spec.key)
+            if old is not None:
+                # 종류 변환: 예전 채널의 이름·카테고리·권한을 그대로 써서 새로 만들고, 예전 채널은 지우지 않는다
+                kwargs = {"category": old.category, "overwrites": old.overwrites,
+                          "reason": "RaidBook 채널 종류 변경 (텍스트 ↔ 음성)"}
+                if spec.voice:
+                    ch = await guild.create_voice_channel(old.name, **kwargs)
+                else:
+                    ch = await guild.create_text_channel(old.name, **kwargs)
+                try:
+                    await ch.edit(position=old.position)
+                except Exception:
+                    pass
+                config[spec.key] = ch.id
+                created[spec.key] = [ch.id]
+                replaced[spec.key] = old.id
+                if logger:
+                    logger.info(f"[채널 종류 변경] {spec.key} #{old.name}({old.id}) → "
+                                f"{'음성' if spec.voice else '텍스트'} ({ch.id})")
+                continue
             # 같은 이름 채널이 카테고리에 이미 있으면 재사용 (재시작 반복 생성 방지)
             pool = category.voice_channels if spec.voice else category.text_channels
             ch = discord.utils.get(pool, name=spec.name)
