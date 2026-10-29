@@ -6,8 +6,6 @@
     1565041141890547813
   ],
   "_command_channel_ids_comment": "음악 명령을 받을 채널 ID 목록. 비우면 모든 채널에서 사용 가능",
-  "allow_voice_channel_chat": true,
-  "_allow_voice_channel_chat_comment": "true면 모든 음성채널의 채팅창에서도 음악 명령 허용 (command_channel_ids와 별개)",
   "control_role_ids": [],
   "_control_role_ids_comment": "봇과 같은 음성채널에 없어도 건너뛰기/정지/볼륨을 할 수 있는 역할 ID (서버 관리 권한자는 항상 가능)",
   "youtube_only": true,

@@ -109,8 +109,6 @@ if [str(c) for c in config.get("command_channel_ids") or []] == [str(_OLD_DEFAUL
 
 # 비어 있으면 모든 채널에서 명령 허용
 COMMAND_CHANNEL_IDS = _int_set(config.get("command_channel_ids"))
-# 음성채널의 채팅창에서는 command_channel_ids와 관계없이 항상 허용 (어느 음성채널에서든 그 자리에서 /재생)
-ALLOW_VOICE_CHAT = bool(config.get("allow_voice_channel_chat", True))
 # 같은 음성채널에 없어도 건너뛰기/정지 등을 할 수 있는 역할 (서버 관리 권한자는 항상 가능)
 CONTROL_ROLE_IDS = _int_set(config.get("control_role_ids"))
 DEFAULT_VOLUME = max(1, min(100, int(config.get("default_volume", 50) or 50)))
@@ -385,12 +383,9 @@ async def _check_channel(interaction: discord.Interaction) -> bool:
     if interaction.guild is None:
         await interaction.response.send_message("서버 채널에서만 사용할 수 있습니다.", ephemeral=True)
         return False
-    in_voice_chat = isinstance(interaction.channel, (discord.VoiceChannel, discord.StageChannel))
-    if COMMAND_CHANNEL_IDS and interaction.channel_id not in COMMAND_CHANNEL_IDS \
-            and not (ALLOW_VOICE_CHAT and in_voice_chat):
+    if COMMAND_CHANNEL_IDS and interaction.channel_id not in COMMAND_CHANNEL_IDS:
         mentions = " ".join(f"<#{c}>" for c in COMMAND_CHANNEL_IDS)
-        where = f"{mentions} 또는 음성채널 채팅" if ALLOW_VOICE_CHAT else mentions
-        await interaction.response.send_message(f"음악 명령은 {where} 에서 사용해 주세요.", ephemeral=True)
+        await interaction.response.send_message(f"음악 명령은 {mentions} 에서 사용해 주세요.", ephemeral=True)
         return False
     return True
 
