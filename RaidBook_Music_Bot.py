@@ -112,8 +112,20 @@ COMMAND_CHANNEL_IDS = _int_set(config.get("command_channel_ids"))
 # 같은 음성채널에 없어도 건너뛰기/정지 등을 할 수 있는 역할 (서버 관리 권한자는 항상 가능)
 CONTROL_ROLE_IDS = _int_set(config.get("control_role_ids"))
 DEFAULT_VOLUME = max(1, min(100, int(config.get("default_volume", 50) or 50)))
-MAX_QUEUE = max(1, int(config.get("max_queue", 50) or 50))
-MAX_PLAYLIST = max(1, int(config.get("max_playlist", 30) or 30))
+# 예전 기본값(대기열 50곡·재생목록 30곡)으로 만들어진 설정은 새 기본값 10곡으로 1회 교체 (동훈님 요청 2026-10-30)
+_queue_migrated = False
+for _key, _old in (("max_queue", 50), ("max_playlist", 30)):
+    if config.get(_key) == _old:
+        config[_key] = 10
+        _queue_migrated = True
+if _queue_migrated:
+    try:
+        write_json_atomic(CONFIG_PATH, config)
+        log.info("[설정] 대기열·재생목록 최대 곡 수 → 10곡")
+    except Exception as e:
+        log.warning(f"[설정] 대기열 최대 곡 수 저장 실패 (이번 실행만 적용): {e}")
+MAX_QUEUE = max(1, int(config.get("max_queue", 10) or 10))
+MAX_PLAYLIST = max(1, int(config.get("max_playlist", 10) or 10))
 IDLE_DISCONNECT = max(30, int(config.get("idle_disconnect_seconds", 300) or 300))
 # 듣는 사람이 아무도 없을 때 일시정지 후 이 시간이 지나면 재생 종료·퇴장 (그 사이 누가 들어오면 이어서 재생)
 EMPTY_DISCONNECT = max(10, int(config.get("empty_disconnect_seconds", 60) or 60))
@@ -539,7 +551,7 @@ async def cmd_play(interaction: discord.Interaction, 링크: str):
     p.text_channel_id = interaction.channel_id
     added = p.queue.add(tracks)
     if added == 0:
-        await interaction.followup.send(f"⚠ 대기열이 가득 찼습니다 (최대 {MAX_QUEUE}곡).")
+        await interaction.followup.send(f"⚠ 대기열이 가득 찼어요 (최대 {MAX_QUEUE}곡). 곡이 끝나거나 `/삭제`로 빼면 다시 추가할 수 있어요.")
         return
     busy = vc.is_playing() or vc.is_paused()
     if added == 1:
