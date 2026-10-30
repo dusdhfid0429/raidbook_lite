@@ -14,6 +14,7 @@
   "daily_refresh_hour": 0,
   "daily_refresh_minute": 0,
   "close_minutes": 0,
+  "_close_at_spawn_applied": true,
   "admin_role_ids": [],
   "_admin_role_ids_comment": "버튼/명령 관리자 역할 ID 목록. 서버 소유자·서버 관리 권한 보유자는 항상 허용.",
   "admin_role_names": ["운영진"],

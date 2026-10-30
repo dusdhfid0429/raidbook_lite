@@ -249,6 +249,17 @@ if "settlement" not in config:
     except Exception as e:
         log.info(f"[설정] 정산 비율 기본값 저장 실패 (기본값으로 동작): {e}")
 
+# 마감 기본값을 '리젠 정각 마감'(close_minutes 0)으로 바꿨다 — 예전 설치판 값은 한 번만 0으로 맞추고, 이후 운영진이 고친 값은 그대로 둔다
+if not config.get("_close_at_spawn_applied"):
+    _old_cm = config.get("close_minutes")
+    config["close_minutes"] = 0
+    config["_close_at_spawn_applied"] = True
+    try:
+        write_json_atomic(CONFIG_PATH, config, log)
+        log.info(f"[설정] 보스 알림 마감을 리젠 정각으로 변경 (close_minutes {_old_cm} → 0)")
+    except Exception as e:
+        log.info(f"[설정] 마감 시각 변경 저장 실패 (이번 실행만 정각 마감): {e}")
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -759,8 +770,8 @@ async def build_message_map_from_channel(days=7):
         for line in desc.split("\n"):
             if "보스 출현 알림" in line:
                 boss_name = line.replace("📢", "").replace("**", "").replace("보스 출현 알림", "").strip()
-            elif "보스 리젠 시각" in line:
-                boss_time = line.split("**")[-2].strip() if "**" in line else ""
+            elif _embed_line_boss_time(line):
+                boss_time = _embed_line_boss_time(line)
 
         if boss_name and boss_time:
             message_map[(boss_name, boss_time)] = str(msg.id)
@@ -2714,21 +2725,31 @@ def _apply_embed_image(embed, *, thumbnail_file=None, image_url="", image_filena
         embed.set_image(url=image_ref)
 
 
+def _embed_line_boss_time(line):
+    """알림 embed 한 줄에서 리젠 시각(HH:MM)을 꺼낸다. 새 형식 '⏰ 리젠 03:00 · 🔒 마감 …'과
+    예전 형식 '⏰ 보스 리젠 시각: **03:00**' 모두 읽는다."""
+    m = re.search(r"(?:리젠 시각: \*\*|⏰ 리젠 )(\d{1,2}:\d{2})", line or "")
+    return m.group(1) if m else ""
+
+
 def make_attend_embed(boss_name, count, names, boss_time=None, expired=False, loot="",
                       disable_time=None, thumbnail_file=None, image_url="", image_filename="",
                       confirmed_names=None, late_names=None, confirmed_at="", countdown_text="",
                       loot_acquirers=""):
     embed = discord.Embed(color=0x888888 if expired else 0x00ff00)
     embed.title = f"📢 {boss_name} 보스 출현 알림"
+    # 폰 푸시 미리보기는 마크다운/<t:> 타임스탬프를 원문 그대로 보여 주므로 시각은 평문으로 쓰고,
+    # 남은 시간(<t:R>)은 미리보기에 안 나오는 필드로 뺀다
+    deadline_ts = None
+    time_line = f"⏰ 리젠 {boss_time}" if boss_time else ""
     if expired:
-        status = "🔒 **마감됨**"
+        status = "🔒 마감됨"
     else:
         dt = _coerce_disable_time(disable_time)
         if dt:
-            unix_ts = int(dt.timestamp())
-            status = f"🔒 마감 <t:{unix_ts}:R> (<t:{unix_ts}:t>)\n보스 탐에 참여하실 분은 아래 버튼을 눌러주세요!"
-        else:
-            status = "보스 탐에 참여하실 분은 아래 버튼을 눌러주세요!"
+            deadline_ts = int(dt.timestamp())
+            time_line += f"  ·  🔒 마감 {dt.strftime('%H:%M')}"
+        status = "보스 탐에 참여하실 분은 아래 버튼을 눌러주세요!"
 
     if not PARTY_ENABLED:
         confirmed_names = None
@@ -2748,8 +2769,8 @@ def make_attend_embed(boss_name, count, names, boss_time=None, expired=False, lo
         attendee_block = f"✅ {'최종' if expired else '현재'} 참석: {count}명 | {names}"
 
     desc = (
-        f"⏰ 보스 리젠 시각: **{boss_time}**\n"
-        f"{status}\n\n"
+        (f"{time_line}\n" if time_line else "")
+        + f"{status}\n\n"
         f"{attendee_block}"
     )
     if countdown_text:
@@ -2760,6 +2781,8 @@ def make_attend_embed(boss_name, count, names, boss_time=None, expired=False, lo
         if loot_acquirers and not LOOT_AUCTION_BUTTON:
             desc += f"\n👤 **획득자**: {loot_acquirers}"
     embed.description = desc
+    if deadline_ts:
+        embed.add_field(name="⏳ 마감까지", value=f"<t:{deadline_ts}:R>", inline=False)
     _apply_embed_image(embed, thumbnail_file=thumbnail_file, image_url=image_url, image_filename=image_filename)
     return embed
 
@@ -4413,8 +4436,8 @@ async def recover(ctx, message_id: str):
     for line in desc.split("\n"):
         if "보스 출현 알림" in line:
             boss_name = line.replace("📢", "").replace("**", "").replace("보스 출현 알림", "").strip()
-        elif "보스 리젠 시각" in line:
-            boss_time = line.split("**")[-2].strip() if "**" in line else ""
+        elif _embed_line_boss_time(line):
+            boss_time = _embed_line_boss_time(line)
         elif "참석:" in line:
             parts = line.split("|")
             if len(parts) > 1:
@@ -5294,8 +5317,8 @@ async def recover_missing_from_channel():
         for line in desc.split("\n"):
             if "보스 출현 알림" in line:
                 boss_name = line.replace("📢", "").replace("**", "").replace("보스 출현 알림", "").strip()
-            elif "보스 리젠 시각" in line:
-                boss_time = line.split("**")[-2].strip() if "**" in line else ""
+            elif _embed_line_boss_time(line):
+                boss_time = _embed_line_boss_time(line)
             elif "참석:" in line:
                 parts = line.split("|")
                 if len(parts) > 1:
