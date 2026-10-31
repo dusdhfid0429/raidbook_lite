@@ -7,7 +7,7 @@ from datetime import datetime
 # 버전 정보
 VERSION_MAJOR = 1
 VERSION_MINOR = 0
-VERSION_PATCH = 24
+VERSION_PATCH = 25
 VERSION_BUILD = 1
 
 # 버전 문자열
@@ -16,7 +16,7 @@ VERSION_FULL = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}.{VERSION_BUILD}
 
 # 릴리즈 정보
 RELEASE_DATE = "2026-10-29"
-RELEASE_NAME = "Lite - 경매장 음성채널, 운영진 역할 권한"
+RELEASE_NAME = "Lite - 정각 마감, 폰 알림 시각, 마감 후 인원 추가·제거, 경매 카운트 표시"
 RELEASE_CHANNEL = "stable"  # stable, beta, alpha
 
 # 제품 정보
