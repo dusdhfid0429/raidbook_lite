@@ -94,7 +94,7 @@ def apply_bid(rec, uid, name, now=None):
 
 
 BID_HISTORY_SHOW = 5
-BID_SETTLE_SEC = 2   # 입찰 후 이만큼 기다렸다가 마감 카운트 시작 (연타 몰림 정리 시간)
+BID_SETTLE_SEC = 3   # 입찰 후 이만큼 기다렸다가 마감 카운트 시작 (연타 몰림 정리 시간)
 
 
 def fmt_click_time(entry):
@@ -125,7 +125,7 @@ def bid_history_text(rec, n=BID_HISTORY_SHOW):
 
 
 def close_deadline(rec):
-    """마감 예정 unix 시각. 입찰 없으면 시작 + 카운트, 입찰 후엔 마지막 입찰 + 2초 대기 + 카운트. 진행 전이면 None."""
+    """마감 예정 unix 시각. 입찰 없으면 시작 + 카운트, 입찰 후엔 마지막 입찰 + BID_SETTLE_SEC 대기 + 카운트. 진행 전이면 None."""
     if rec.get("status") != "active":
         return None
     if rec.get("last_bid_at"):

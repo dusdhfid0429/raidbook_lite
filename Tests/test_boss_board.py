@@ -97,7 +97,7 @@ def test_board_embed_builds():
     ba.apply_bid(lot, 1, "김", now=2001.5)
     e = ba.build_board_embed(board, "아데나", now=2002)
     assert "## 🥇 김 (" in e.description                                   # 최고 입찰자 + 누른 시각
-    assert "## ⏳ 입찰 확인 중" in e.description                             # 2초 대기 중
+    assert "## ⏳ 입찰 확인 중" in e.description                             # 입찰 직후 대기 중
     dl = 2001.5 + ba.BID_SETTLE_SEC + lot["countdown_sec"]
     e = ba.build_board_embed(board, "아데나", now=dl - 3.2)
     assert "## ⏱️ 남은 시간 4초" in e.description                         # 대기 후 카운트 (올림 초)
