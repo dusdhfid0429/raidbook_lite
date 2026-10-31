@@ -1980,8 +1980,15 @@ async def _apply_board_results(board):
 
 
 class AttendView(ui.View):
-    def __init__(self, message_id=None, boss_name=None, boss_time=None, created_date=None, loot=None, expired=False, disable_time=None):
+    def __init__(self, message_id=None, boss_name=None, boss_time=None, created_date=None, loot=None, expired=False, disable_time=None,
+                 persistent=False):
         super().__init__(timeout=None)
+        # 마감 후에만 보이는 ➕/➖ 인원 버튼 — 재시작 복구용(persistent) 등록 뷰는 모든 버튼을 가진다
+        self._attendee_edit_items = [c for c in self.children
+                                     if getattr(c, "custom_id", None) in ATTENDEE_EDIT_BUTTON_IDS]
+        if not expired and not persistent:
+            for child in self._attendee_edit_items:
+                self.remove_item(child)
         self.message_id = message_id
         self.channel_id = None  # loot 버튼 클릭 시 채워짐
         self.image_url = ""    # Discord CDN URL (edit 시 재사용)
@@ -2054,6 +2061,9 @@ class AttendView(ui.View):
         for child in self.children:
             if getattr(child, "custom_id", None) in ATTEND_BUTTON_IDS:
                 child.disabled = True
+        for child in self._attendee_edit_items:
+            if child not in self.children:
+                self.add_item(child)
 
         id_to_name = _load_id_to_name_mapping()
         names = ", ".join(id_to_name.get(u, u) for u in self.attendees) if self.attendees else "없음"
@@ -2393,6 +2403,33 @@ class AttendView(ui.View):
             await interaction.followup.send(text, ephemeral=True)
         except Exception:
             pass
+
+    async def _open_attendee_picker(self, interaction: discord.Interaction, action):
+        await interaction.response.defer(ephemeral=True)
+        if not _is_bot_admin(interaction.user):
+            await interaction.followup.send("⛔ 인원 추가/제거는 운영진만 할 수 있어요.", ephemeral=True)
+            return
+        record = _closed_record_for_edit(interaction.message)
+        if record is None:
+            await interaction.followup.send("⏳ 마감된 알림에서만 쓸 수 있어요. 진행 중에는 인원체크를 써 주세요.",
+                                            ephemeral=True)
+            return
+        if action == "add":
+            await interaction.followup.send("➕ 추가할 멤버를 검색해서 고르세요.", view=_AttendeeAddPicker(record),
+                                            ephemeral=True)
+        elif not record[4]:
+            await interaction.followup.send("참석자가 없어요.", ephemeral=True)
+        else:
+            await interaction.followup.send("➖ 제거할 참석자를 고르세요.", view=_AttendeeRemovePicker(record),
+                                            ephemeral=True)
+
+    @ui.button(label="인원 추가", emoji="➕", style=discord.ButtonStyle.secondary, custom_id="boss_attendee_add")
+    async def attendee_add_button(self, interaction: discord.Interaction, button: ui.Button):
+        await self._open_attendee_picker(interaction, "add")
+
+    @ui.button(label="인원 제거", emoji="➖", style=discord.ButtonStyle.secondary, custom_id="boss_attendee_remove")
+    async def attendee_remove_button(self, interaction: discord.Interaction, button: ui.Button):
+        await self._open_attendee_picker(interaction, "remove")
 
     def _is_loot_attendee(self, user):
         uid = str(user.id)
@@ -3181,7 +3218,9 @@ async def _repair_closed_alert_buttons(limit=300):
                     if getattr(c, "custom_id", None):
                         states[c.custom_id] = bool(getattr(c, "disabled", False))
             stale_party = "boss_party" in states and not PARTY_ENABLED   # 파티 기능 끔 → 버튼 숨김
-            if "boss_voicecheck" not in states or (states["boss_voicecheck"] and not stale_party):
+            no_edit_buttons = "boss_attendee_add" not in states        # ➕/➖ 인원 버튼 이전 버전 알림
+            if "boss_voicecheck" not in states or (states["boss_voicecheck"] and not stale_party
+                                                   and not no_edit_buttons):
                 continue
             view = AttendView(boss_name=" ", boss_time=" ", loot="", expired=True)
             view.message_id = msg.id
@@ -3195,7 +3234,7 @@ async def _repair_closed_alert_buttons(limit=300):
     except Exception as e:
         log.info(f"[마감 버튼 정리] 기록 조회 실패: {type(e).__name__}: {e}")
     if fixed:
-        log.info(f"[마감 버튼 정리] 마감된 알림 {fixed}개의 인원체크 버튼을 껐어요")
+        log.info(f"[마감 버튼 정리] 마감된 알림 {fixed}개의 버튼을 정리했어요 (인원체크 끄기·인원 추가/제거 버튼)")
 
 
 async def _close_sweep_loop():
@@ -3891,6 +3930,131 @@ def _find_boss_record(boss_name, sheet_name, target_time):
     return best  # (msg_id, boss_time, sheet_name, attendees)
 
 
+async def _apply_attendee_edits(action, msg_id, boss_name, boss_time, sheet_name, targets, current_attendees):
+    """보스 기록 참석자 수동 추가/제거 — Excel·active_messages.json·알림 embed를 함께 맞춘다.
+    targets: [(uid, 표시이름), ...]. 성공 시 None, 실패 시 사용자에게 보여 줄 오류 문구."""
+    msg_id = str(msg_id)
+    async with excel_lock:
+        wb = load_workbook(EXCEL_PATH)
+        ws = wb[sheet_name] if sheet_name in wb.sheetnames else None
+        if ws is None:
+            return "❌ 시트를 찾을 수 없어요."
+
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        total = len(current_attendees)
+        for attendee_uid, attendee_display in targets:
+            if action == "add":
+                next_row = ws.max_row + 1
+                ws.cell(row=next_row, column=1, value=msg_id).number_format = "@"
+                ws.cell(row=next_row, column=2, value=boss_name)
+                ws.cell(row=next_row, column=3, value=boss_time)
+                ws.cell(row=next_row, column=4, value=attendee_uid)   # col4 = UID
+                ws.cell(row=next_row, column=5, value=now_str)
+                ws.cell(row=next_row, column=6, value=attendee_display)  # col6 = 이름
+                total += 1
+                log.info(rb_att.attend_log_line("참석", f"{boss_name} {boss_time}",
+                                                msg_id, attendee_display, attendee_uid, total))
+            else:  # remove
+                for row_idx in range(ws.max_row, 1, -1):
+                    row_data = [ws.cell(row=row_idx, column=c).value for c in range(1, 7)]
+                    if str(row_data[0]) == msg_id and str(row_data[3]) == str(attendee_uid):
+                        ws.delete_rows(row_idx)
+                        break
+                total = max(0, total - 1)
+                log.info(rb_att.attend_log_line("취소", f"{boss_name} {boss_time}",
+                                                msg_id, attendee_display, attendee_uid, total))
+
+        apply_border_all(ws)
+        auto_column_width(ws)
+        update_history_sheet(wb)
+        update_boss_attendance_sheet(wb)
+        update_stats_sheet(wb)
+        reorder_sheets(wb)
+        save_ok, save_err = await save_workbook_safely(wb, EXCEL_PATH, "보스 데이터")
+        if not save_ok:
+            return f"❌ 저장 실패: {save_err}"
+        backup_excel()
+
+    # ── active_messages.json 동기화 ──────────────────────────────────
+    # 수동 추가/삭제 후 JSON이 구버전이면 이후 버튼 클릭 시 덮어씌워지는 문제 방지
+    updated_attendees = None
+    try:
+        with active_messages_lock:
+            active = load_active_messages()
+            if msg_id in active:
+                current = list(active[msg_id].get("attendees", []))
+                for attendee_uid, _ in targets:
+                    uid_str = str(attendee_uid)
+                    if action == "add":
+                        if uid_str not in current:
+                            current.append(uid_str)
+                    elif uid_str in current:
+                        current.remove(uid_str)
+                active[msg_id]["attendees"] = current
+                write_active_messages(active)
+                updated_attendees = current
+                log.info(f"[수동조정-JSON] {action} {len(targets)}명 → active_messages 동기화 완료 (총 {len(current)}명)")
+    except Exception as je:
+        log.info(f"[수동조정-JSON 동기화 실패] {je}")
+
+    # ── Discord 메시지 embed 갱신 ─────────────────────────────────────
+    try:
+        active = load_active_messages()
+        msg_info = active.get(msg_id)
+        is_active = msg_info is not None
+        # 마감된 메시지(JSON에 없음)는 ALERT_CHANNEL_ID 폴백 사용
+        channel_id = int(msg_info["channel_id"]) if msg_info else ALERT_CHANNEL_ID
+
+        # 참석자 목록: JSON 동기화 결과 우선, 없으면 Excel에서 재조회
+        if updated_attendees is None:
+            updated_attendees = [str(u) for u in load_attendees_from_excel(int(msg_id))]
+
+        id_to_name = _load_id_to_name_mapping()
+        names = ", ".join(id_to_name.get(u, u) for u in updated_attendees) if updated_attendees else "없음"
+
+        loot_text = ""
+        loot_acq = ""
+        disable_time = None
+        if msg_info:
+            loot_text = msg_info.get("loot", "") or ""
+            loot_acq = msg_info.get("loot_acquirers", "") or load_loot_acquirers_from_excel(int(msg_id)) or ""
+            disable_time = _coerce_disable_time(msg_info.get("disable_time"))
+            image_url = msg_info.get("image_url", "") or ""
+            image_filename = msg_info.get("image_filename", "") or ""
+        else:
+            loot_text, _, _ = load_loot_from_excel(int(msg_id))
+            loot_acq = load_loot_acquirers_from_excel(int(msg_id)) or ""
+            image_url = ""
+            image_filename = ""
+
+        if channel_id:
+            ch = bot.get_channel(channel_id)
+            if ch:
+                target_msg = await ch.fetch_message(int(msg_id))
+                msg_image_filename, msg_image_url = _message_image_ref(target_msg)
+                image_filename = msg_image_filename or image_filename
+                image_url = msg_image_url or image_url
+                image_file, image_kwargs = _boss_image_file_and_kwargs(boss_name, target_msg)
+                embed = make_attend_embed(
+                    boss_name, len(updated_attendees), names,
+                    boss_time, expired=not is_active,
+                    loot=loot_text, loot_acquirers=loot_acq, disable_time=disable_time,
+                    **image_kwargs,
+                )
+                await _edit_message_with_image(
+                    target_msg,
+                    embed=embed,
+                    image_file=image_file,
+                    content=_boss_alert_content(boss_name, boss_time, expired=not is_active),
+                )
+                log.info(f"[수동조정-embed 갱신] {boss_name} {boss_time} | 참석 {len(updated_attendees)}명")
+    except Exception as me:
+        log.info(f"[수동조정-embed 갱신 실패] {me}")
+
+    return None
+
+
 class _AttendeeEditView(discord.ui.View):
     def __init__(self, action, msg_id, boss_name, boss_time, sheet_name, attendee_uid, attendee_display, current_attendees):
         super().__init__(timeout=60)
@@ -3906,141 +4070,139 @@ class _AttendeeEditView(discord.ui.View):
     @discord.ui.button(label="확인", style=discord.ButtonStyle.green)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
+        err = None
         try:
-            async with excel_lock:
-                wb = load_workbook(EXCEL_PATH)
-                ws = wb[self.sheet_name] if self.sheet_name in wb.sheetnames else None
-                if ws is None:
-                    await interaction.followup.send("❌ 시트를 찾을 수 없어요.")
-                    self.stop()
-                    return
-
-                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                date_log = self.sheet_name.replace("-", "")
-
-                if self.action == "add":
-                    next_row = ws.max_row + 1
-                    ws.cell(row=next_row, column=1, value=self.msg_id).number_format = "@"
-                    ws.cell(row=next_row, column=2, value=self.boss_name)
-                    ws.cell(row=next_row, column=3, value=self.boss_time)
-                    ws.cell(row=next_row, column=4, value=self.attendee_uid)   # col4 = UID
-                    ws.cell(row=next_row, column=5, value=now_str)
-                    ws.cell(row=next_row, column=6, value=self.attendee_display)  # col6 = 이름
-                    new_total = len(self.current_attendees) + 1
-                    log.info(rb_att.attend_log_line("참석", f"{self.boss_name} {self.boss_time}",
-                                                    self.msg_id, self.attendee_display,
-                                                    self.attendee_uid, new_total))
-                else:  # remove
-                    for row_idx in range(ws.max_row, 1, -1):
-                        row_data = [ws.cell(row=row_idx, column=c).value for c in range(1, 7)]
-                        if str(row_data[0]) == self.msg_id and str(row_data[3]) == str(self.attendee_uid):
-                            ws.delete_rows(row_idx)
-                            break
-                    new_total = max(0, len(self.current_attendees) - 1)
-                    log.info(rb_att.attend_log_line("취소", f"{self.boss_name} {self.boss_time}",
-                                                    self.msg_id, self.attendee_display,
-                                                    self.attendee_uid, new_total))
-
-                apply_border_all(ws)
-                auto_column_width(ws)
-                update_history_sheet(wb)
-                update_boss_attendance_sheet(wb)
-                update_stats_sheet(wb)
-                reorder_sheets(wb)
-                save_ok, save_err = await save_workbook_safely(wb, EXCEL_PATH, "보스 데이터")
-                if not save_ok:
-                    await interaction.followup.send(f"❌ 저장 실패: {save_err}")
-                    self.stop()
-                    return
-                backup_excel()
-
-            # ── active_messages.json 동기화 ──────────────────────────────────
-            # 수동 추가/삭제 후 JSON이 구버전이면 이후 버튼 클릭 시 덮어씌워지는 문제 방지
-            updated_attendees = None
-            try:
-                with active_messages_lock:
-                    active = load_active_messages()
-                    if self.msg_id in active:
-                        current = list(active[self.msg_id].get("attendees", []))
-                        uid_str = str(self.attendee_uid)
-                        if self.action == "add":
-                            if uid_str not in current:
-                                current.append(uid_str)
-                        else:
-                            if uid_str in current:
-                                current.remove(uid_str)
-                        active[self.msg_id]["attendees"] = current
-                        write_active_messages(active)
-                        updated_attendees = current
-                        log.info(f"[수동조정-JSON] {self.action} {self.attendee_display} → active_messages 동기화 완료 (총 {len(current)}명)")
-            except Exception as je:
-                log.info(f"[수동조정-JSON 동기화 실패] {je}")
-
-            # ── Discord 메시지 embed 갱신 ─────────────────────────────────────
-            try:
-                active = load_active_messages()
-                msg_info = active.get(self.msg_id)
-                is_active = msg_info is not None
-                # 마감된 메시지(JSON에 없음)는 ALERT_CHANNEL_ID 폴백 사용
-                channel_id = int(msg_info["channel_id"]) if msg_info else ALERT_CHANNEL_ID
-
-                # 참석자 목록: JSON 동기화 결과 우선, 없으면 Excel에서 재조회
-                if updated_attendees is None:
-                    updated_attendees = [str(u) for u in load_attendees_from_excel(int(self.msg_id))]
-
-                id_to_name = _load_id_to_name_mapping()
-                names = ", ".join(id_to_name.get(u, u) for u in updated_attendees) if updated_attendees else "없음"
-
-                loot_text = ""
-                loot_acq = ""
-                disable_time = None
-                if msg_info:
-                    loot_text = msg_info.get("loot", "") or ""
-                    loot_acq = msg_info.get("loot_acquirers", "") or load_loot_acquirers_from_excel(int(self.msg_id)) or ""
-                    disable_time = _coerce_disable_time(msg_info.get("disable_time"))
-                    image_url = msg_info.get("image_url", "") or ""
-                    image_filename = msg_info.get("image_filename", "") or ""
-                else:
-                    loot_text, _, _ = load_loot_from_excel(int(self.msg_id))
-                    loot_acq = load_loot_acquirers_from_excel(int(self.msg_id)) or ""
-                    image_url = ""
-                    image_filename = ""
-
-                if channel_id:
-                    ch = bot.get_channel(channel_id)
-                    if ch:
-                        target_msg = await ch.fetch_message(int(self.msg_id))
-                        msg_image_filename, msg_image_url = _message_image_ref(target_msg)
-                        image_filename = msg_image_filename or image_filename
-                        image_url = msg_image_url or image_url
-                        image_file, image_kwargs = _boss_image_file_and_kwargs(self.boss_name, target_msg)
-                        embed = make_attend_embed(
-                            self.boss_name, len(updated_attendees), names,
-                            self.boss_time, expired=not is_active,
-                            loot=loot_text, loot_acquirers=loot_acq, disable_time=disable_time,
-                            **image_kwargs,
-                        )
-                        await _edit_message_with_image(
-                            target_msg,
-                            embed=embed,
-                            image_file=image_file,
-                            content=_boss_alert_content(self.boss_name, self.boss_time, expired=not is_active),
-                        )
-                        log.info(f"[수동조정-embed 갱신] {self.boss_name} {self.boss_time} | 참석 {len(updated_attendees)}명")
-            except Exception as me:
-                log.info(f"[수동조정-embed 갱신 실패] {me}")
-
+            err = await _apply_attendee_edits(self.action, self.msg_id, self.boss_name, self.boss_time,
+                                              self.sheet_name, [(self.attendee_uid, self.attendee_display)],
+                                              self.current_attendees)
+        except Exception as e:
+            err = f"❌ 처리 실패: {e}"
+        if err:
+            await interaction.followup.send(err)
+        else:
             verb = "추가" if self.action == "add" else "제거"
             await interaction.followup.send(
                 f"✅ **{self.attendee_display}**님을 **{self.boss_name} {self.boss_time}** 참석자에서 {verb}했어요."
             )
-        except Exception as e:
-            await interaction.followup.send(f"❌ 처리 실패: {e}")
         self.stop()
 
     @discord.ui.button(label="취소", style=discord.ButtonStyle.red)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(content="❌ 취소됐어요.", view=None, embed=None)
+        self.stop()
+
+
+ATTENDEE_EDIT_BUTTON_IDS = ("boss_attendee_add", "boss_attendee_remove")
+_PICK_PAGE = 25  # Discord 선택 메뉴 한 번에 최대 25개
+
+
+def _closed_record_for_edit(message):
+    """마감된 알림의 기록 (msg_id, boss_name, boss_time, sheet, attendees). 진행 중이면 None.
+    Excel에 행이 하나도 없으면(참석자를 모두 뺀 경우 등) 알림 embed에서 보스·시각을 읽어 빈 기록으로 돌려준다."""
+    mid = str(message.id)
+    if mid in load_active_messages():
+        return None
+    record = _find_boss_record_by_id(mid)
+    if record or not message.embeds:
+        return record
+    emb = message.embeds[0]
+    boss_name = (emb.title or "").replace("📢", "").replace("보스 출현 알림", "").strip()
+    boss_time = next((t for t in map(_embed_line_boss_time, (emb.description or "").split("\n")) if t), "")
+    if not boss_name:
+        return None
+    sheet = message.created_at.astimezone().strftime("%Y-%m-%d")
+    return (mid, boss_name, boss_time, sheet, [])
+
+
+class _AttendeeAddPicker(discord.ui.View):
+    """마감 알림 ➕ 인원 추가 — 서버 멤버 검색(디스코드 기본 자동완성), 이미 참석한 사람은 건너뛴다."""
+
+    def __init__(self, record):
+        super().__init__(timeout=180)
+        self.record = record
+        sel = discord.ui.UserSelect(placeholder="추가할 멤버 이름을 입력해 검색하세요", min_values=1, max_values=25)
+        sel.callback = self._picked
+        self.add_item(sel)
+        self.sel = sel
+
+    async def _picked(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        msg_id, boss_name, boss_time, sheet, _ = self.record
+        fresh = _find_boss_record_by_id(msg_id) or self.record
+        attendees = [str(u) for u in fresh[4]]
+        targets, skipped = [], []
+        for m in self.sel.values:
+            name = getattr(m, "display_name", None) or m.name
+            if getattr(m, "bot", False) or str(m.id) in attendees:
+                skipped.append(name)
+                continue
+            update_user_mapping(str(m.id), name)
+            targets.append((str(m.id), name))
+        if not targets:
+            await interaction.edit_original_response(
+                content=f"⚠️ 이미 참석자예요: {', '.join(skipped)}" if skipped else "추가할 멤버가 없어요.", view=None)
+            return
+        try:
+            err = await _apply_attendee_edits("add", msg_id, boss_name, boss_time, sheet, targets, attendees)
+        except Exception as e:
+            err = f"❌ 처리 실패: {e}"
+        text = err or f"✅ **{boss_name} {boss_time}** 참석자에 추가: {', '.join(n for _, n in targets)}"
+        if skipped and not err:
+            text += f"\n-# 이미 참석자라 건너뜀: {', '.join(skipped)}"
+        log.info(f"[인원 추가 버튼] msg:{msg_id} user:{interaction.user.id} | {[u for u, _ in targets]} {err or ''}")
+        await interaction.edit_original_response(content=text, view=None)
+        self.stop()
+
+
+class _AttendeeRemovePicker(discord.ui.View):
+    """마감 알림 ➖ 인원 제거 — 이 알림의 참석자만 목록에 올린다 (25명 넘으면 페이지)."""
+
+    def __init__(self, record, page=0):
+        super().__init__(timeout=180)
+        self.record = record
+        id2n = _load_id_to_name_mapping()
+        people = sorted(((str(u), id2n.get(str(u), str(u))) for u in record[4]), key=lambda x: x[1])
+        self.people = people
+        pages = max(1, (len(people) + _PICK_PAGE - 1) // _PICK_PAGE)
+        self.page = min(page, pages - 1)
+        chunk = people[self.page * _PICK_PAGE:(self.page + 1) * _PICK_PAGE]
+        sel = discord.ui.Select(
+            placeholder="제거할 참석자를 고르세요" + (f" ({self.page + 1}/{pages})" if pages > 1 else ""),
+            min_values=1, max_values=len(chunk),
+            options=[discord.SelectOption(label=name[:100], value=uid) for uid, name in chunk])
+        sel.callback = self._picked
+        self.add_item(sel)
+        self.sel = sel
+        if pages > 1:
+            for label, delta in (("◀ 이전", -1), ("다음 ▶", 1)):
+                b = discord.ui.Button(label=label, style=discord.ButtonStyle.secondary,
+                                      disabled=not (0 <= self.page + delta < pages))
+                b.callback = self._pager(delta)
+                self.add_item(b)
+
+    def _pager(self, delta):
+        async def go(interaction: discord.Interaction):
+            await interaction.response.edit_message(view=_AttendeeRemovePicker(self.record, self.page + delta))
+            self.stop()
+        return go
+
+    async def _picked(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        msg_id, boss_name, boss_time, sheet, _ = self.record
+        fresh = _find_boss_record_by_id(msg_id) or self.record
+        attendees = [str(u) for u in fresh[4]]
+        names = dict(self.people)
+        targets = [(uid, names.get(uid, uid)) for uid in self.sel.values if uid in attendees]
+        if not targets:
+            await interaction.edit_original_response(content="⚠️ 이미 참석자 목록에 없어요.", view=None)
+            return
+        try:
+            err = await _apply_attendee_edits("remove", msg_id, boss_name, boss_time, sheet, targets, attendees)
+        except Exception as e:
+            err = f"❌ 처리 실패: {e}"
+        text = err or f"✅ **{boss_name} {boss_time}** 참석자에서 제거: {', '.join(n for _, n in targets)}"
+        log.info(f"[인원 제거 버튼] msg:{msg_id} user:{interaction.user.id} | {[u for u, _ in targets]} {err or ''}")
+        await interaction.edit_original_response(content=text, view=None)
         self.stop()
 
 
@@ -5516,7 +5678,7 @@ async def initialize_on_ready():
     global daily_refresh_task
     channel_notes = await _ensure_boss_channels() if AUTO_CREATE_CHANNELS else []
     _auto_migrate_user_mapping()
-    bot.add_view(AttendView())
+    bot.add_view(AttendView(persistent=True))
     bot.add_view(LootAuctionView())  # 전리품 공지 경매시작 버튼 재시작 복구
     bot.add_view(AuctionView(boss_auction))  # 경매 메시지 버튼 재시작 복구
     bot.add_view(BoardView(boss_auction))  # 경매 진행판 버튼 재시작 복구
