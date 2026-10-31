@@ -92,12 +92,16 @@ def test_board_embed_builds():
     assert "⏸️ 다음 경매" in [f.name for f in e.fields]
     ba.board_start_next(board, 2000)
     e = ba.build_board_embed(board, "아데나", now=2001)
-    assert "## ⏱️ 마감 <t:" in e.description   # 카운트는 설명란 큰 글씨
+    assert "## ⏱️ 남은 시간 " in e.description   # 카운트는 설명란 큰 글씨 (남은 초를 직접 표시)
     lot = ba.board_current(board)
     ba.apply_bid(lot, 1, "김", now=2001.5)
     e = ba.build_board_embed(board, "아데나", now=2002)
     assert "## 🥇 김 (" in e.description                                   # 최고 입찰자 + 누른 시각
-    assert f"<t:{int(2001.5 + ba.BID_SETTLE_SEC + lot['countdown_sec']) + 1}:R>" in e.description  # 2초 대기 후 카운트
+    assert "## ⏳ 입찰 확인 중" in e.description                             # 2초 대기 중
+    dl = 2001.5 + ba.BID_SETTLE_SEC + lot["countdown_sec"]
+    e = ba.build_board_embed(board, "아데나", now=dl - 3.2)
+    assert "## ⏱️ 남은 시간 4초" in e.description                         # 대기 후 카운트 (올림 초)
+    assert ba.fmt_remaining(75) == "1분 15초" and ba.fmt_remaining(0) == "마감 처리 중…"
 
 
 def _finish(board, winners):

@@ -23,6 +23,7 @@ PC 시계와 Discord 시계의 차이(clock_offset)를 보정하고, 마감 직�
 
 import asyncio
 import json
+import math
 import os
 import re
 import time
@@ -35,6 +36,7 @@ from RaidBook_common import write_json_atomic
 
 CLOSE_GRACE_SEC = 0.8   # 마감 직전 클릭의 네트워크·처리 지연 허용 (판정은 클릭 시각 기준)
 REFRESH_DELAY_SEC = 0.3   # 잠금이 없을 때 최종 상태로 다시 그리기까지 최소 대기
+TICK_SEC = 1.0            # 진행 중 남은 시간 다시 그리는 간격
 
 AMOUNT_HINT = "숫자 또는 단위 표기 (예: 80만, 1.5억, 120만5천, 3,750,000)"
 
@@ -140,6 +142,14 @@ def bid_lock_until(rec):
     return float(rec["last_bid_at"]) + BID_SETTLE_SEC
 
 
+def fmt_remaining(sec):
+    """남은 시간 표시 — 올림 초 (0 이하면 마감 처리 중)."""
+    left = int(math.ceil(sec - 0.05))
+    if left <= 0:
+        return "마감 처리 중…"
+    return f"{left // 60}분 {left % 60:02d}초" if left >= 60 else f"{left}초"
+
+
 def live_block(rec, unit="", now=None):
     """진행 중 경매의 큰 글씨 부분: 최고 입찰자(누른 시각) · 현재가 · 마감 카운트."""
     now = time.time() if now is None else now
@@ -155,7 +165,14 @@ def live_block(rec, unit="", now=None):
         lines.append("### 💰 아직 입찰 없음")
     dl = close_deadline(rec)
     if dl:
-        lines.append(f"## ⏱️ 마감 <t:{int(dl) + 1}:R>")
+        # Discord <t:R>은 1분 안쪽을 '몇 초 후'로만 보여 줘서 카운트가 멈춘 것처럼 보인다 —
+        # 남은 초를 직접 적고, 진행 중에는 봇이 1초마다 다시 그린다 (BossAuction._ticker)
+        until = bid_lock_until(rec)
+        if until and now < until:
+            lines.append(f"## ⏳ 입찰 확인 중 · 곧 {int(rec['countdown_sec'])}초 카운트")
+        else:
+            left = fmt_remaining(dl - now)
+            lines.append(f"## ⏱️ 남은 시간 {left}" if left[0].isdigit() else f"## ⏱️ {left}")
         lines.append(f"-# 입찰이 들어오면 {BID_SETTLE_SEC}초 동안 입찰 버튼이 잠기고, 그 뒤 {int(rec['countdown_sec'])}초 카운트 · 새 입찰이 오면 다시 시작")
     return "\n".join(lines)
 
@@ -200,7 +217,7 @@ class AuctionStore:
         write_json_atomic(self.path, data, self.log)
 
 
-def build_embed(rec, currency=""):
+def build_embed(rec, currency="", now=None):
     unit = f" {currency}" if currency else ""
     item = rec.get("item", "?")
     status = rec.get("status")
@@ -219,7 +236,7 @@ def build_embed(rec, currency=""):
             embed = discord.Embed(title=f"⏸️ 경매 대기 — {item}",
                                   description="▶️ 경매시작을 누르면 입찰이 열립니다.", color=0x378add)
         else:
-            embed = discord.Embed(title=f"🔨 경매 진행중 — {item}", description=live_block(rec, unit),
+            embed = discord.Embed(title=f"🔨 경매 진행중 — {item}", description=live_block(rec, unit, now),
                                   color=0xf0b232)
         embed.add_field(name="시작가", value=f"{int(rec.get('start_price', 0)):,}{unit}", inline=True)
         embed.add_field(name="호가", value=f"{int(rec.get('increment', 0)):,}{unit}", inline=True)
@@ -247,6 +264,7 @@ class BossAuction:
         self.lock = asyncio.Lock()
         self._close_tasks = {}
         self._refresh_tasks = {}   # 메시지ID → 연타 후 마지막 상태로 다시 그리는 예약
+        self._tick_tasks = {}      # 메시지ID → 진행 중 남은 시간을 1초마다 다시 그리는 작업
         self.clock_offset = 0.0   # PC 시계 − Discord 시계 (초)
         # 경매 진행판 전체 종료 콜백 async (board) -> None (보스 알림에 결과 반영)
         self.on_board_finished = None
@@ -395,6 +413,60 @@ class BossAuction:
                       f"| 등록자 {creator.display_name} | msg {msg.id}")
         return True, f"✅ 경매 세팅을 등록했어요 → {msg.jump_url}\n경매 메시지에서 ▶️ 경매시작을 누르면 시작돼요."
 
+    def _ensure_ticker(self, mid):
+        """진행 중 경매의 남은 시간 표시를 1초마다 갱신 (경매당 하나, 마감되면 스스로 끝남)."""
+        key = str(mid)
+        cur = self._tick_tasks.get(key)
+        if cur and not cur.done():
+            return
+
+        async def _run():
+            msg = None
+            try:
+                while True:
+                    await asyncio.sleep(TICK_SEC)
+                    latest = self.store.get(mid)
+                    if not latest:
+                        return
+                    board = latest.get("type") == "board"
+                    target = board_current(latest) if board else latest
+                    if not target or target.get("status") != "active" or (board and latest.get("status") != "active"):
+                        return
+                    dl = close_deadline(target)
+                    if dl is None or self.discord_now() > dl - 0.3:
+                        return   # 마감 처리(자동 마감·점검 루프)가 마지막 화면을 그린다 — 그 화면을 덮지 않게 먼저 멈춤
+                    pending = self._refresh_tasks.get(key)
+                    if pending and not pending.done():
+                        continue   # 입찰 직후 최종 갱신이 곧 그린다
+                    if msg is None:
+                        cid = int(latest.get("channel_id") or self.channel_id or 0)
+                        ch = self.bot.get_channel(cid) or await self.bot.fetch_channel(cid)
+                        msg = ch.get_partial_message(int(mid))
+                    now = self.discord_now()
+                    embed = (build_board_embed(latest, self.currency, now) if board
+                             else build_embed(latest, self.currency, now))
+                    try:
+                        await msg.edit(embed=embed, view=self.view_for(latest))
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        self.log.info(f"[경매 카운트 갱신 실패] {key}: {type(e).__name__}: {e}")
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                self.log.info(f"[경매 카운트 중단] {key}: {type(e).__name__}: {e}")
+            finally:
+                if self._tick_tasks.get(key) is task:
+                    self._tick_tasks.pop(key, None)
+
+        task = asyncio.ensure_future(_run())
+        self._tick_tasks[key] = task
+
+    def _stop_ticker(self, mid):
+        t = self._tick_tasks.pop(str(mid), None)
+        if t and not t.done():
+            t.cancel()
+
     def _schedule_close(self, mid, rec):
         dl = close_deadline(rec)
         if dl is None:
@@ -413,6 +485,7 @@ class BossAuction:
                 self.log.info(f"[경매 자동 마감 실패] {mid}: {type(e).__name__}: {e}")
 
         self._close_tasks[str(mid)] = asyncio.ensure_future(_run())
+        self._ensure_ticker(mid)
 
     async def close(self, mid, *, expected_bids=None, by=None):
         """낙찰/유찰 처리. expected_bids가 주어지면 그 사이 새 입찰이 있었을 때 무시."""
@@ -426,6 +499,7 @@ class BossAuction:
             rec["closed_at"] = datetime.now().isoformat(timespec="seconds")
             if by:
                 rec["closed_by"] = by
+            self._stop_ticker(mid)
             self.store.save(mid, rec)
         self._close_tasks.pop(str(mid), None)
         try:
@@ -611,6 +685,7 @@ class BossAuction:
                 self.log.info(f"[진행판 자동 진행 실패] {mid}: {type(e).__name__}: {e}")
 
         self._close_tasks[str(mid)] = asyncio.ensure_future(_run())
+        self._ensure_ticker(mid)
 
     async def start_next_lot(self, mid, start_ts, allowed=None):
         """관리자 ▶️ — 다음 대기 아이템 시작. 반환: (lot | None, 안내문)."""
@@ -640,6 +715,7 @@ class BossAuction:
             if expected is not None and (board.get("current"), (lot or {}).get("bid_count")) != expected:
                 return None
             closed_lot = board_close_current(board, by=by)
+            self._stop_ticker(mid)
             if stop:
                 for x in board.get("lots") or []:
                     if x.get("status") == "pending":
