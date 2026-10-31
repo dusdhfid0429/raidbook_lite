@@ -2762,6 +2762,16 @@ def _apply_embed_image(embed, *, thumbnail_file=None, image_url="", image_filena
         embed.set_image(url=image_ref)
 
 
+def _join_guide_text():
+    """알림 안내 문구. 참석 버튼을 숨긴(음성 인원체크로 참석 기록) 서버는 보탐 음성방으로 안내하고 채널 링크를 단다."""
+    if not HIDE_ATTEND_BUTTONS:
+        return "보스 탐에 참여하실 분은 아래 버튼을 눌러주세요!"
+    links = " ".join(f"<#{cid}>" for cid in VOICE_CHANNEL_IDS)
+    if links:
+        return f"🎙️ 보탐 음성방으로 이동해 주세요! 👉 {links}"
+    return "🎙️ 보탐 음성방으로 이동해 주세요!"
+
+
 def _embed_line_boss_time(line):
     """알림 embed 한 줄에서 리젠 시각(HH:MM)을 꺼낸다. 새 형식 '⏰ 리젠 03:00 · 🔒 마감 …'과
     예전 형식 '⏰ 보스 리젠 시각: **03:00**' 모두 읽는다."""
@@ -2786,7 +2796,7 @@ def make_attend_embed(boss_name, count, names, boss_time=None, expired=False, lo
         if dt:
             deadline_ts = int(dt.timestamp())
             time_line += f"  ·  🔒 마감 {dt.strftime('%H:%M')}"
-        status = "보스 탐에 참여하실 분은 아래 버튼을 눌러주세요!"
+        status = _join_guide_text()
 
     if not PARTY_ENABLED:
         confirmed_names = None
