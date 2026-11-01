@@ -2050,6 +2050,19 @@ class AttendView(ui.View):
             logger=log, label=f"{self.boss_name} {self.boss_time}")
 
     async def disable_buttons(self, message):
+        # 같은 알림의 인원체크와 겹치지 않게 순서대로 — 리젠 정각 마감이면 정각 인원체크와 같은 순간에 돈다
+        async with _alert_lock(self.message_id or getattr(message, "id", 0)):
+            await self._disable_buttons_locked(message)
+
+    async def _disable_buttons_locked(self, message):
+        mid = self.message_id or getattr(message, "id", None)
+        if mid and _spawn_check_pending(mid):
+            # 정각 인원체크가 아직이면 마감 직전에 먼저 해서 음성방 인원을 담고 마감한다
+            try:
+                await _voice_check_locked(mid)
+            except Exception as e:
+                log.info(f"[마감 전 인원체크 실패] {mid}: {type(e).__name__}: {e}")
+            _SPAWN_CHECKED.add(str(mid))
         # 다른 경로(음성 인원체크 등)에서 갱신된 참석자/득템 반영 후 로그 기반 검증
         if self.message_id:
             self._load_latest_from_json(self.message_id)
@@ -2789,8 +2802,11 @@ def make_attend_embed(boss_name, count, names, boss_time=None, expired=False, lo
     # 남은 시간(<t:R>)은 미리보기에 안 나오는 필드로 뺀다
     deadline_ts = None
     time_line = f"⏰ 리젠 {boss_time}" if boss_time else ""
+    closed_at = ""
     if expired:
-        status = "🔒 마감됨"
+        status = ""
+        dt = _coerce_disable_time(disable_time)
+        closed_at = dt.strftime("%H:%M") if dt else ""
     else:
         dt = _coerce_disable_time(disable_time)
         if dt:
@@ -2817,8 +2833,8 @@ def make_attend_embed(boss_name, count, names, boss_time=None, expired=False, lo
 
     desc = (
         (f"{time_line}\n" if time_line else "")
-        + f"{status}\n\n"
-        f"{attendee_block}"
+        + (f"{status}\n" if status else "")
+        + f"\n{attendee_block}"
     )
     if countdown_text:
         desc += f"\n\n{countdown_text}"
@@ -2830,6 +2846,8 @@ def make_attend_embed(boss_name, count, names, boss_time=None, expired=False, lo
     embed.description = desc
     if deadline_ts:
         embed.add_field(name="⏳ 마감까지", value=f"<t:{deadline_ts}:R>", inline=False)
+    elif expired:
+        embed.add_field(name="🔒 마감됨", value=closed_at or "\u200b", inline=False)
     _apply_embed_image(embed, thumbnail_file=thumbnail_file, image_url=image_url, image_filename=image_filename)
     return embed
 
@@ -3047,7 +3065,35 @@ def _collect_voice_members(guild, voice_channel=None) -> dict:
     return members
 
 
+_ALERT_LOCKS = defaultdict(asyncio.Lock)   # 알림 메시지ID → 인원체크·마감 순서 보장
+_SPAWN_CHECKED = set()                     # 정각 인원체크를 마친 알림 메시지ID
+
+
+def _alert_lock(message_id):
+    return _ALERT_LOCKS[str(message_id)]
+
+
+def _spawn_check_pending(message_id):
+    """정각 인원체크 대상인데 아직 안 했고, 정각이 지난 지 얼마 안 된 활성 알림인지."""
+    key = str(message_id)
+    if not VOICE_CHECK_AT_SPAWN or key in _SPAWN_CHECKED:
+        return False
+    info = load_active_messages().get(key)
+    if not info:
+        return False
+    try:
+        spawn = datetime.strptime(f"{info.get('created_date')} {info.get('boss_time')}", "%Y-%m-%d %H:%M")
+    except Exception:
+        return False
+    return 0 <= (datetime.now() - spawn).total_seconds() <= 300
+
+
 async def voice_check_message(message_id, voice_channel=None) -> tuple | None:
+    async with _alert_lock(message_id):
+        return await _voice_check_locked(message_id, voice_channel)
+
+
+async def _voice_check_locked(message_id, voice_channel=None) -> tuple | None:
     """활성 보스 알림 1건의 참석자를 지금 음성채널 접속자로 맞추고 메시지 갱신.
     새로 들어온 사람은 [참석], 이전 체크엔 있었지만 지금 없는 사람은 [취소] 로그를 남겨
     마감 시 로그 검증에서도 같은 결과가 된다.
@@ -3111,6 +3157,8 @@ async def voice_check_message(message_id, voice_channel=None) -> tuple | None:
         except Exception as e:
             log.info(f"[인원체크-즉시저장 실패] {e}")
 
+    if key not in load_active_messages():
+        return len(added), len(attendees), len(removed)   # 그 사이 마감됨 — 마감 화면을 덮지 않는다
     try:
         msg = await ch.fetch_message(int(key))
         # message_id 없이 생성 → 생성자의 Excel 조회(1MB 통합문서 여러 번 로드) 생략, JSON에서만 복원
@@ -3147,7 +3195,11 @@ def _schedule_voice_check(message_id, spawn_dt):
     async def _run():
         await asyncio.sleep(delay)
         try:
-            await voice_check_message(message_id)
+            async with _alert_lock(message_id):
+                if str(message_id) in _SPAWN_CHECKED:
+                    return   # 마감이 먼저 돌며 이미 인원체크함
+                _SPAWN_CHECKED.add(str(message_id))
+                await _voice_check_locked(message_id)
         except Exception as e:
             log.info(f"[정각 인원체크 실패] {message_id}: {type(e).__name__}: {e}")
 
@@ -3229,15 +3281,33 @@ async def _repair_closed_alert_buttons(limit=300):
                         states[c.custom_id] = bool(getattr(c, "disabled", False))
             stale_party = "boss_party" in states and not PARTY_ENABLED   # 파티 기능 끔 → 버튼 숨김
             no_edit_buttons = "boss_attendee_add" not in states        # ➕/➖ 인원 버튼 이전 버전 알림
+            # 마감과 정각 인원체크가 겹쳐 진행 중 화면(⏳ 마감까지)으로 덮인 알림 — 화면도 마감으로 다시 그림
+            stale_embed = bool(msg.embeds) and any((f.name or "").startswith("⏳ 마감까지") for f in msg.embeds[0].fields)
             if "boss_voicecheck" not in states or (states["boss_voicecheck"] and not stale_party
-                                                   and not no_edit_buttons):
+                                                   and not no_edit_buttons and not stale_embed):
                 continue
             view = AttendView(boss_name=" ", boss_time=" ", loot="", expired=True)
             view.message_id = msg.id
             if states.get("boss_party") is False:
                 view._apply_confirmed_button_state()
             try:
-                await msg.edit(view=view)
+                record = _find_boss_record_by_id(str(msg.id)) if stale_embed else None
+                if record:
+                    _, boss_name, boss_time, _, attendees = record
+                    id2n = _load_id_to_name_mapping()
+                    loot_text, _, _ = load_loot_from_excel(msg.id)
+                    m = re.search(r"마감 (\d{1,2}:\d{2})", msg.embeds[0].description or "")
+                    closed = (datetime.strptime(f"{msg.created_at.astimezone():%Y-%m-%d} {m.group(1)}", "%Y-%m-%d %H:%M")
+                              if m else None)
+                    image_file, image_kwargs = _boss_image_file_and_kwargs(boss_name, msg)
+                    embed = make_attend_embed(
+                        boss_name, len(attendees), ", ".join(id2n.get(u, u) for u in attendees) or "없음",
+                        boss_time, expired=True, loot=loot_text or "", disable_time=closed,
+                        loot_acquirers=load_loot_acquirers_from_excel(msg.id) or "", **image_kwargs)
+                    await _edit_message_with_image(msg, embed=embed, view=view, image_file=image_file,
+                                                   content=_boss_alert_content(boss_name, boss_time, expired=True))
+                else:
+                    await msg.edit(view=view)
                 fixed += 1
             except Exception as e:
                 log.info(f"[마감 버튼 정리] {msg.id} 수정 실패: {type(e).__name__}: {e}")
@@ -5476,7 +5546,7 @@ async def recover_missing_from_channel():
         title = embed.title or ""
         if "보스 출현 알림" not in f"{title}\n{desc}":
             continue
-        if "마감됨" not in desc:
+        if "마감됨" not in desc and not any("마감됨" in (f.name or "") for f in embed.fields):
             continue
 
         # embed 파싱
