@@ -1986,9 +1986,7 @@ class AttendView(ui.View):
         # 마감 후에만 보이는 ➕/➖ 인원 버튼 — 재시작 복구용(persistent) 등록 뷰는 모든 버튼을 가진다
         self._attendee_edit_items = [c for c in self.children
                                      if getattr(c, "custom_id", None) in ATTENDEE_EDIT_BUTTON_IDS]
-        if not expired and not persistent:
-            for child in self._attendee_edit_items:
-                self.remove_item(child)
+        self._persistent = persistent
         self.message_id = message_id
         self.channel_id = None  # loot 버튼 클릭 시 채워짐
         self.image_url = ""    # Discord CDN URL (edit 시 재사용)
@@ -2034,11 +2032,23 @@ class AttendView(ui.View):
         for child in self.children:
             if getattr(child, "custom_id", None) == "boss_party":
                 child.disabled = True
-        # 참석/취소 버튼은 마감 후 비활성
-        if expired:
-            for child in self.children:
-                if getattr(child, "custom_id", None) in ATTEND_BUTTON_IDS:
-                    child.disabled = True
+        # 버튼 상태는 마감 여부 하나로 정한다 (마감 시각이 이미 지났으면 마감 상태로 시작)
+        if not persistent:
+            self.apply_phase(expired or _close_time_passed(self.disable_time))
+
+    def apply_phase(self, closed):
+        """마감 전: 인원체크(참석/취소) 켜짐, ➕/➖ 숨김 / 마감 후: 인원체크 꺼짐, ➕/➖ 노출.
+        모든 버튼은 이 한 곳에서만 마감 여부에 맞춰 바뀐다."""
+        self.expired = bool(closed)
+        for child in self.children:
+            if getattr(child, "custom_id", None) in ATTEND_BUTTON_IDS:
+                child.disabled = self.expired
+        for child in self._attendee_edit_items:
+            shown = child in self.children
+            if self.expired and not shown:
+                self.add_item(child)
+            elif not self.expired and shown and not self._persistent:
+                self.remove_item(child)
 
     def _verify_attendees_from_log(self):
         """로그 리플레이 마감 검증 — 공용 엔진(RaidBook_attendance) 위임."""
@@ -2068,15 +2078,7 @@ class AttendView(ui.View):
             self._load_latest_from_json(self.message_id)
         verified_attendees = self._verify_attendees_from_log()
         self.attendees = verified_attendees
-        self.expired = True
-
-        # 참석/취소만 비활성. 획득 아이템 버튼은 마감 후에도 사용 가능하도록 유지
-        for child in self.children:
-            if getattr(child, "custom_id", None) in ATTEND_BUTTON_IDS:
-                child.disabled = True
-        for child in self._attendee_edit_items:
-            if child not in self.children:
-                self.add_item(child)
+        self.apply_phase(True)   # 획득 아이템·경매생성은 마감 후에도 그대로
 
         id_to_name = _load_id_to_name_mapping()
         names = ", ".join(id_to_name.get(u, u) for u in self.attendees) if self.attendees else "없음"
@@ -2723,8 +2725,39 @@ def _boss_image_file_and_kwargs(boss_name, message=None):
     return None, {"image_url": image_url, "image_filename": image_filename}
 
 
+def _close_time_passed(disable_time):
+    dt = _coerce_disable_time(disable_time)
+    return dt is not None and datetime.now() >= dt
+
+
+def _embed_as_closed(embed, disable_time):
+    """진행 중 화면으로 만든 embed를 마감 화면으로 바꾼다 (마감 시각이 지난 뒤 늦게 도착한 갱신용)."""
+    dt = _coerce_disable_time(disable_time)
+    guide = _join_guide_text()
+    lines = [ln for ln in (embed.description or "").split("\n") if ln.strip() != guide]
+    desc = "\n".join(lines).replace("✅ 현재 참석", "✅ 최종 참석")
+    desc = re.sub(r"  ·  🔒 마감 \d{1,2}:\d{2}", "", desc)
+    embed.description = desc
+    keep = [(f.name, f.value, f.inline) for f in embed.fields if not (f.name or "").startswith("⏳ 마감까지")]
+    embed.clear_fields()
+    for name, value, inline in keep:
+        embed.add_field(name=name, value=value, inline=inline)
+    if not any((f.name or "").startswith("🔒 마감됨") for f in embed.fields):
+        embed.add_field(name="🔒 마감됨", value=dt.strftime("%H:%M") if dt else "\u200b", inline=False)
+    embed.color = discord.Color(0x888888)
+    return embed
+
+
 async def _edit_message_with_image(message, *, embed, view=discord.utils.MISSING,
                                    image_file=None, content=discord.utils.MISSING):
+    # 버튼·화면은 메시지의 마감 시각 기준 — 어떤 경로의 갱신이든 마감 시각이 지났으면 마감 상태로 그린다
+    if isinstance(view, AttendView) and _close_time_passed(view.disable_time):
+        if not view.expired:
+            view.apply_phase(True)
+        if any((f.name or "").startswith("⏳ 마감까지") for f in embed.fields):
+            embed = _embed_as_closed(embed, view.disable_time)
+            if content is not discord.utils.MISSING and view.boss_name:
+                content = _boss_alert_content(view.boss_name, view.boss_time, expired=True)
     kwargs = {"embed": embed}
     if view is not discord.utils.MISSING:
         kwargs["view"] = view
@@ -2796,6 +2829,7 @@ def make_attend_embed(boss_name, count, names, boss_time=None, expired=False, lo
                       disable_time=None, thumbnail_file=None, image_url="", image_filename="",
                       confirmed_names=None, late_names=None, confirmed_at="", countdown_text="",
                       loot_acquirers=""):
+    expired = expired or _close_time_passed(disable_time)   # 화면도 마감 시각 기준
     embed = discord.Embed(color=0x888888 if expired else 0x00ff00)
     embed.title = f"📢 {boss_name} 보스 출현 알림"
     # 폰 푸시 미리보기는 마크다운/<t:> 타임스탬프를 원문 그대로 보여 주므로 시각은 평문으로 쓰고,
@@ -3028,19 +3062,7 @@ async def _post_boss_alert(boss_name, spawn_dt):
     _schedule_voice_check(msg.id, spawn_dt)
 
     if disable_time is not None:
-        async def auto_disable():
-            delay = (disable_time - datetime.now()).total_seconds()
-            if delay > 0:
-                await asyncio.sleep(delay)
-            try:
-                await attend_view.disable_buttons(msg)
-                log.info(f"[자동 마감] {boss_name} {boss_time_str} | 참석: {len(attend_view.attendees)}명")
-            except Exception as e:
-                log.info(f"[자동 마감 실패] {boss_name} {boss_time_str} {msg.id}: {type(e).__name__}: {e} — 점검 루프가 재시도")
-                return
-            remove_active_message(msg.id)
-
-        asyncio.ensure_future(auto_disable())
+        _schedule_close_trigger(msg.id, disable_time)
 
 
 def _collect_voice_members(guild, voice_channel=None) -> dict:
@@ -3227,6 +3249,73 @@ def _alert_close_time(info):
 _CLOSE_SWEEP_GRACE_SEC = 90   # 개별 마감 타이머가 먼저 처리하도록 여유
 
 
+_CLOSE_TRIGGERS = {}   # 알림 메시지ID → 마감 시각에 한 번 도는 마감 트리거
+
+
+def _schedule_close_trigger(message_id, close_at):
+    """알림 마감 트리거 (메시지당 하나). 마감 시각에 _close_alert 를 부르고, 모든 버튼은 그 결과를 따른다.
+    다시 부르면(연장·재오픈) 이전 트리거를 바꾼다. close_at 이 None 이면 무기한 — 트리거 없음."""
+    key = str(message_id)
+    old = _CLOSE_TRIGGERS.pop(key, None)
+    if old and not old.done():
+        old.cancel()
+    close_at = _coerce_disable_time(close_at)
+    if close_at is None:
+        return
+
+    async def _run():
+        try:
+            delay = (close_at - datetime.now()).total_seconds()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            await _close_alert(key, reason="자동 마감")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            log.info(f"[자동 마감 실패] {key}: {type(e).__name__}: {e} — 점검 루프가 재시도")
+        finally:
+            if _CLOSE_TRIGGERS.get(key) is task:
+                _CLOSE_TRIGGERS.pop(key, None)
+
+    task = asyncio.ensure_future(_run())
+    _CLOSE_TRIGGERS[key] = task
+
+
+async def _close_alert(message_id, *, reason="자동 마감", view=None, message=None):
+    """알림 1건 마감 (마감 트리거·점검 루프·수동 마감·종료·복구 공용). 이미 마감됐으면 None, 마감하면 그 view."""
+    key = str(message_id)
+    async with _alert_lock(key):
+        info = load_active_messages().get(key)
+        if not info:
+            return None
+        msg = message
+        if msg is None:
+            try:
+                ch = bot.get_channel(int(info["channel_id"])) or await bot.fetch_channel(int(info["channel_id"]))
+                msg = await ch.fetch_message(int(key))
+            except discord.NotFound:
+                remove_active_message(key)
+                log.info(f"[{reason}] {key} 메시지/채널 없음 → 활성 목록에서 제거")
+                return None
+        if view is None:
+            view = AttendView(message_id=int(key), boss_name=info.get("boss_name", ""),
+                              boss_time=info.get("boss_time", ""), created_date=info.get("created_date"),
+                              loot=info.get("loot", "") or "", disable_time=info.get("disable_time") or None)
+            view.attendees = list(info.get("attendees", []))
+            view.loot_acquirers = info.get("loot_acquirers", "") or ""
+            view.loot_announcement_id = info.get("loot_announcement_id", "") or info.get("announcement_msg_id", "") or ""
+            view.image_url = info.get("image_url", "") or ""
+            view.image_filename = info.get("image_filename", "") or ""
+        view.message_id = int(key)
+        await view._disable_buttons_locked(msg)
+        remove_active_message(key)
+    t = _CLOSE_TRIGGERS.get(key)
+    if t and t is not asyncio.current_task() and not t.done():
+        t.cancel()
+    log.info(f"[{reason}] {view.boss_name} {view.boss_time} | 참석: {len(view.attendees)}명")
+    return view
+
+
 async def _sweep_overdue_alerts():
     """마감 시각이 지났는데 아직 활성인 알림을 마감 (타이머 유실·재시작·실패 대비)."""
     now = datetime.now()
@@ -3235,28 +3324,9 @@ async def _sweep_overdue_alerts():
         if close_at is None or (now - close_at).total_seconds() < _CLOSE_SWEEP_GRACE_SEC:
             continue
         try:
-            ch = bot.get_channel(int(info["channel_id"])) or await bot.fetch_channel(int(info["channel_id"]))
-            msg = await ch.fetch_message(int(mid))
-        except discord.NotFound:
-            remove_active_message(mid)
-            log.info(f"[마감 점검] {mid} 메시지/채널 없음 → 활성 목록에서 제거")
-            continue
-        except Exception as e:
-            log.info(f"[마감 점검] {mid} 조회 실패: {type(e).__name__}: {e}")
-            continue
-        view = AttendView(message_id=int(mid), boss_name=info.get("boss_name", ""),
-                          boss_time=info.get("boss_time", ""), created_date=info.get("created_date"),
-                          loot=info.get("loot", "") or "", disable_time=close_at)
-        view.attendees = list(info.get("attendees", []))
-        view.loot_acquirers = info.get("loot_acquirers", "") or ""
-        try:
-            await view.disable_buttons(msg)
+            await _close_alert(mid, reason=f"마감 점검 (예정 {close_at.strftime('%m-%d %H:%M')})")
         except Exception as e:
             log.info(f"[마감 점검] {mid} 마감 실패: {type(e).__name__}: {e}")
-            continue
-        remove_active_message(mid)
-        log.info(f"[마감 점검] {info.get('boss_name')} {info.get('boss_time')} {mid} 마감 처리 "
-                 f"(예정 {close_at.strftime('%m-%d %H:%M')})")
 
 
 async def _repair_closed_alert_buttons(limit=300):
@@ -3360,9 +3430,7 @@ async def shutdown():
                     or info.get("announcement_msg_id", "")
                     or ""
                 )
-                await attend_view.disable_buttons(msg)
-                remove_active_message(msg_id_str)
-                log.info(f"[종료 마감] {info['boss_name']} {info['boss_time']} | 참석: {len(attend_view.attendees)}명")
+                await _close_alert(msg_id_str, reason="종료 마감", view=attend_view, message=msg)
             except Exception as e:
                 log.info(f"[종료 마감 실패] {msg_id_str}: {e}")
 
@@ -4466,18 +4534,7 @@ async def reopen(ctx, date_time_str: str, minutes: int = 20):
                         image_url=attend_view.image_url,
                         image_filename=attend_view.image_filename)
 
-    async def auto_disable():
-        delay = (disable_time - datetime.now()).total_seconds()
-        if delay > 0:
-            await asyncio.sleep(delay)
-        try:
-            await attend_view.disable_buttons(msg)
-            log.info(f"[자동 마감] {boss_name} {boss_time} | 참석: {len(attend_view.attendees)}명")
-        except Exception:
-            pass
-        remove_active_message(int(message_id))
-
-    asyncio.ensure_future(auto_disable())
+    _schedule_close_trigger(message_id, disable_time)
     log.info(f"[재활성화] {boss_name} {boss_time} | {minutes}분 | 메시지 ID: {message_id}")
     await ctx.send(f"✅ **{boss_name}** 알림을 다시 활성화했어요! ({minutes}분 후 마감)")
 
@@ -4631,18 +4688,7 @@ async def create(ctx, boss_name: str, boss_time_str: str, minutes: int = 20):
     except ValueError:
         pass
 
-    async def auto_disable():
-        delay = (disable_time - datetime.now()).total_seconds()
-        if delay > 0:
-            await asyncio.sleep(delay)
-        try:
-            await attend_view.disable_buttons(msg)
-            log.info(f"[자동 마감] {boss_name} {boss_time_str} | 참석: {len(attend_view.attendees)}명")
-        except Exception:
-            pass
-        remove_active_message(msg.id)
-
-    asyncio.ensure_future(auto_disable())
+    _schedule_close_trigger(msg.id, disable_time)
     log.info(f"[수동 생성] {boss_name} {boss_time_str} | {minutes}분 후 마감 | 메시지 ID: {msg.id}")
     await ctx.send(f"✅ **{boss_name}** {boss_time_str} 참석 알림을 생성했어요! ({minutes}분 후 마감)")
 
@@ -4917,9 +4963,7 @@ async def close(ctx, message_id: str):
     )
     attend_view.image_url = info.get("image_url", "")
     attend_view.image_filename = info.get("image_filename", "")
-    await attend_view.disable_buttons(msg)
-    remove_active_message(int(message_id))
-    log.info(f"[수동 마감] {info['boss_name']} {info['boss_time']} | 참석: {len(attend_view.attendees)}명")
+    await _close_alert(message_id, reason="수동 마감", view=attend_view, message=msg)
     await ctx.send(f"✅ **{info['boss_name']}** {info['boss_time']} 수동 마감 완료! ({len(attend_view.attendees)}명)")
 
 
@@ -4999,18 +5043,7 @@ async def activate(ctx, message_id: str, minutes: int = 0):
                         image_filename=attend_view.image_filename)
 
     if minutes > 0:
-        async def auto_disable():
-            delay = (disable_time - datetime.now()).total_seconds()
-            if delay > 0:
-                await asyncio.sleep(delay)
-            try:
-                await attend_view.disable_buttons(msg)
-                log.info(f"[자동 마감] {boss_name} {boss_time} | 참석: {len(attend_view.attendees)}명")
-            except Exception:
-                pass
-            remove_active_message(int(message_id))
-
-        asyncio.ensure_future(auto_disable())
+        _schedule_close_trigger(message_id, disable_time)
 
     deadline_msg = f"{minutes}분 후 마감" if minutes > 0 else "수동 마감 전까지 유지"
     log.info(f"[수동 활성화] {boss_name} {boss_time} | {deadline_msg} | 메시지 ID: {message_id}")
@@ -5084,18 +5117,7 @@ async def extend(ctx, message_id: str, minutes: int = 20):
         except Exception:
             pass
 
-        async def auto_disable():
-            delay = (new_disable_time - datetime.now()).total_seconds()
-            if delay > 0:
-                await asyncio.sleep(delay)
-            try:
-                await attend_view.disable_buttons(msg)
-                log.info(f"[자동 마감] {info['boss_name']} {info['boss_time']} | 참석: {len(attend_view.attendees)}명")
-            except Exception:
-                pass
-            remove_active_message(int(message_id))
-
-        asyncio.ensure_future(auto_disable())
+        _schedule_close_trigger(message_id, new_disable_time)
     except Exception:
         pass
 
@@ -5141,15 +5163,7 @@ async def test(ctx, boss_name: str = "테스트보스"):
 
     save_active_message(msg.id, ctx.channel.id, boss_name, boss_time_str, disable_time.strftime("%Y-%m-%d %H:%M:%S"), created_date=now.strftime("%Y-%m-%d"))
 
-    async def auto_disable():
-        await asyncio.sleep(120)
-        try:
-            await attend_view.disable_buttons(msg)
-        except Exception:
-            pass
-        remove_active_message(msg.id)
-
-    asyncio.ensure_future(auto_disable())
+    _schedule_close_trigger(msg.id, disable_time)
 
 
 @bot.hybrid_command()
@@ -5856,27 +5870,16 @@ async def initialize_on_ready():
             log.info(f"[복구] 메시지 {msg_id_str} 무기한 활성 유지 (close_minutes 비활성)")
         elif remaining <= 0:
             try:
-                await attend_view.disable_buttons(msg)
+                await _close_alert(msg_id_str, reason="복구 즉시 마감", view=attend_view, message=msg)
             except Exception as e:
                 # 하나가 실패해도 나머지 복구는 계속 — 남은 건은 마감 점검 루프가 다시 시도
                 log.info(f"[복구] 메시지 {msg_id_str} 즉시 마감 실패: {type(e).__name__}: {e}")
                 restore_logs.append(f"  ⚠️ **{info['boss_name']}** {info['boss_time']} — 마감 실패, 1분 내 재시도")
                 continue
-            remove_active_message(msg_id_str)
             restore_logs.append(f"  🔒 **{info['boss_name']}** {info['boss_time']} — 즉시 마감 (참석 {attendee_count}명)")
             log.info(f"[복구] 메시지 {msg_id_str} 즉시 마감")
         else:
-            async def auto_disable_restore(v=attend_view, m=msg, mid=msg_id_str, d=remaining):
-                await asyncio.sleep(d)
-                try:
-                    await v.disable_buttons(m)
-                except Exception as e:
-                    log.info(f"[복구 마감 실패] {mid}: {type(e).__name__}: {e} — 점검 루프가 재시도")
-                    return
-                remove_active_message(mid)
-                log.info(f"[자동 마감] {v.boss_name} {v.boss_time} | 참석: {len(v.attendees)}명 (재시작 복구분)")
-
-            asyncio.ensure_future(auto_disable_restore())
+            _schedule_close_trigger(msg_id_str, disable_time)
             restore_logs.append(f"  🔄 **{info['boss_name']}** {info['boss_time']} — {int(remaining)}초 후 마감 (참석 {attendee_count}명)")
             log.info(f"[복구] 메시지 {msg_id_str} auto_disable 재등록 ({int(remaining)}초 후)")
 
