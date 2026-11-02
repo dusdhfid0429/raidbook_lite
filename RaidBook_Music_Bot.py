@@ -474,6 +474,37 @@ async def do_queue(interaction: discord.Interaction):
     await interaction.response.send_message(embed=e, ephemeral=True)
 
 
+VOLUME_STEP = 10   # 재생 패널 🔉/🔊 버튼 한 번에 바뀌는 볼륨(%)
+
+
+def _apply_volume(p: GuildPlayer, percent: int) -> int:
+    """볼륨을 1~100%로 맞춰 재생 중인 곡에도 바로 적용. 적용된 값(%)을 돌려준다."""
+    percent = max(1, min(100, int(percent)))
+    p.volume = percent / 100
+    vc = p.voice()
+    if vc and isinstance(vc.source, discord.PCMVolumeTransformer):
+        vc.source.volume = p.volume
+    return percent
+
+
+async def do_volume_step(interaction: discord.Interaction, delta: int):
+    p = await _check_control(interaction)
+    if not p:
+        return
+    before = round(p.volume * 100)
+    now = _apply_volume(p, before + delta)
+    if now == before:
+        edge = "최대" if delta > 0 else "최소"
+        await interaction.response.send_message(f"🔊 이미 {edge} 볼륨이에요 ({now}%).", ephemeral=True)
+        return
+    # 패널 메시지의 볼륨 칸을 바로 갱신 (버튼 응답으로 메시지 수정)
+    if p.current and p.np_message and interaction.message and interaction.message.id == p.np_message.id:
+        await interaction.response.edit_message(embed=_np_embed(p))
+    else:
+        await interaction.response.send_message(f"🔊 볼륨 {now}%", ephemeral=True)
+        await _refresh_np(p)
+
+
 class MusicControlView(discord.ui.View):
     """재생 메시지 버튼 — custom_id 고정 + timeout 없음 (봇 재시작 후에도 눌리면 현재 상태 기준으로 동작)."""
 
@@ -495,6 +526,16 @@ class MusicControlView(discord.ui.View):
     @discord.ui.button(emoji="📜", style=discord.ButtonStyle.secondary, custom_id="rb_music:queue")
     async def _queue(self, interaction: discord.Interaction, _b):
         await do_queue(interaction)
+
+    @discord.ui.button(emoji="🔉", label=f"-{VOLUME_STEP}", style=discord.ButtonStyle.secondary,
+                       custom_id="rb_music:voldown", row=1)
+    async def _vol_down(self, interaction: discord.Interaction, _b):
+        await do_volume_step(interaction, -VOLUME_STEP)
+
+    @discord.ui.button(emoji="🔊", label=f"+{VOLUME_STEP}", style=discord.ButtonStyle.secondary,
+                       custom_id="rb_music:volup", row=1)
+    async def _vol_up(self, interaction: discord.Interaction, _b):
+        await do_volume_step(interaction, VOLUME_STEP)
 
 
 # ── 슬래시 명령 ───────────────────────────────────────────────────────────
@@ -616,10 +657,7 @@ async def cmd_volume(interaction: discord.Interaction, 값: app_commands.Range[i
     p = await _check_control(interaction)
     if not p:
         return
-    p.volume = 값 / 100
-    vc = p.voice()
-    if vc and isinstance(vc.source, discord.PCMVolumeTransformer):
-        vc.source.volume = p.volume
+    _apply_volume(p, 값)
     await interaction.response.send_message(f"🔊 볼륨 {값}%", ephemeral=True)
     await _refresh_np(p)
 
