@@ -66,3 +66,20 @@ def clean_for_speech(text: str, names=None, max_len: int = 0) -> str:
 
 def speech_text(display_name: str, text: str, read_name: bool = True) -> str:
     return f"{display_name}, {text}" if read_name and display_name else text
+
+
+_COUNT_WORDS = {1: "하나", 2: "둘", 3: "셋", 4: "넷", 5: "다섯", 6: "여섯", 7: "일곱", 8: "여덟", 9: "아홉", 10: "열"}
+
+
+def count_word(n: int) -> str:
+    """경매 마감 카운트 읽기 — 10 이하는 '다섯·넷…', 그 위는 숫자 그대로."""
+    return _COUNT_WORDS.get(int(n), str(int(n)))
+
+
+def countdown_plan(seconds: float, slack: float = 0.5):
+    """카운트 시작 시점 기준 [(몇 초 뒤, 숫자)] — 마지막 숫자(1)는 마감 1초 전.
+    시작이 늦어 남은 시간이 짧으면 그만큼 작은 숫자부터 읽는다."""
+    import math
+    seconds = float(seconds)
+    top = max(1, int(math.floor(seconds + slack)))
+    return [(max(0.0, seconds - n), n) for n in range(top, 0, -1)]

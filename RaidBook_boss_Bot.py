@@ -3478,6 +3478,22 @@ boss_auction.on_change = lambda: schedule_pending_refresh()
 boss_auction.board_defaults = dict(AUCTION_DEFAULTS)
 boss_auction.get_names = lambda: _load_id_to_name_mapping()
 boss_auction.settlement_config = dict(config.get("settlement") or {})
+# 진행판 마감: true면 진행자(운영진)가 ⏱️ 경매 마감을 눌러야 카운트 시작 (카운트 중 입찰 → 취소·계속, 입찰 없으면 유찰)
+boss_auction.manual_close = bool(config.get("auction_manual_close", True))
+
+
+def _tts_ipc_port():
+    """경매 마감 카운트를 음성으로 읽을 TTS 봇 IPC 포트 (tts_config.json 의 ipc_port, 없으면 7704)."""
+    if config.get("auction_voice_count", True) is False:
+        return 0
+    try:
+        with open(get_config_path("tts_config.json"), encoding="utf-8") as f:
+            return int(json.load(f).get("ipc_port") or 7704)
+    except Exception:
+        return 7704
+
+
+boss_auction.tts_port = _tts_ipc_port()
 
 
 @bot.check

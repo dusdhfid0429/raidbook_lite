@@ -187,6 +187,12 @@ async def _speak(guild: discord.Guild, voice_channel, text: str, voice: str):
                 log.warning(f"[재생 오류] {err}")
             loop.call_soon_threadsafe(done.set)
 
+        for _ in range(100):   # 경매 카운트 숫자가 재생 중이면 끝난 뒤 읽기 (최대 5초)
+            if not vc.is_playing():
+                break
+            await asyncio.sleep(0.05)
+        if vc.is_playing():
+            vc.stop()
         vc.play(discord.FFmpegPCMAudio(path, executable=FFMPEG, before_options="-nostdin"), after=_after)
         await done.wait()
     finally:
@@ -337,13 +343,113 @@ async def cmd_queue(interaction: discord.Interaction):
     await interaction.response.send_message(text, ephemeral=True)
 
 
-# ── IPC (다른 봇이 음성 안내를 보낼 때: {"cmd":"speak","args":[텍스트, 목소리]}) ──
-async def _ipc_speak(text: str, voice: str = None) -> dict:
-    if not DEFAULT_VOICE_CHANNEL_ID:
-        return {"ok": False, "error": "default_voice_channel_id 미설정"}
-    ch = bot.get_channel(DEFAULT_VOICE_CHANNEL_ID)
+# ── 경매 마감 카운트 (보스봇 진행판 ⏱️ 경매 마감 → 경매장 음성채널에서 숫자 읽기) ──
+_countdowns: dict = {}   # guild_id → Task
+
+
+def _voice_target(channel_id=None):
+    """IPC 대상 음성채널 — 지정 채널이 음성채널이면 그것, 아니면 default_voice_channel_id."""
+    for cid in (_int_or_none(channel_id), DEFAULT_VOICE_CHANNEL_ID):
+        ch = bot.get_channel(cid) if cid else None
+        if isinstance(ch, (discord.VoiceChannel, discord.StageChannel)):
+            return ch
+    return None
+
+
+async def _count_clip(n: int, voice: str) -> str:
+    """숫자 음성 파일 (한 번 만들면 재사용)."""
+    path = os.path.join(TMP_DIR, f"count_{voice}_{n}.mp3")
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        tmp = f"{path}.{time.monotonic_ns()}.part"
+        await edge_tts.Communicate(rbt.count_word(n), rbt.VOICES[voice]).save(tmp)
+        os.replace(tmp, path)
+    return path
+
+
+async def _ensure_voice(guild: discord.Guild, voice_channel):
+    vc = guild.voice_client
+    if vc and vc.is_connected():
+        if vc.channel != voice_channel:
+            await vc.move_to(voice_channel)
+        return vc
+    if vc:
+        await vc.disconnect(force=True)
+    return await voice_channel.connect(timeout=15, self_deaf=True)
+
+
+def _stop_countdown(guild_id: int) -> bool:
+    task = _countdowns.pop(guild_id, None)
+    if task and not task.done():
+        task.cancel()
+        return True
+    return False
+
+
+async def _run_countdown(ch, seconds: float, voice: str):
+    guild = ch.guild
+    st = _state(guild.id)
+    loop = asyncio.get_running_loop()
+    end = loop.time() + float(seconds)
+    try:
+        plan = rbt.countdown_plan(seconds)
+        clips = dict(zip([n for _, n in plan],
+                         await asyncio.gather(*(_count_clip(n, voice) for _, n in plan))))
+        vc = await _ensure_voice(guild, ch)
+        _cancel_idle(st)
+        for _, n in plan:
+            at = end - n
+            wait = at - loop.time()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            elif wait < -0.6 and n != plan[0][1]:
+                continue   # 접속이 늦어 이미 지난 숫자는 건너뜀
+            if not vc.is_connected():
+                return
+            if vc.is_playing():
+                vc.stop()
+            vc.play(discord.FFmpegPCMAudio(clips[n], executable=FFMPEG, before_options="-nostdin"))
+    except asyncio.CancelledError:
+        vc = guild.voice_client
+        if vc and vc.is_playing():
+            vc.stop()
+        raise
+    except Exception as e:
+        log.warning(f"[경매 카운트 오류] {type(e).__name__}: {e}")
+    finally:
+        if _countdowns.get(guild.id) is asyncio.current_task():
+            _countdowns.pop(guild.id, None)
+        if st.queue.empty() and (st.worker is None or st.worker.done()):
+            _schedule_idle(guild, st)
+
+
+async def _ipc_countdown(channel_id, seconds, voice: str = None) -> dict:
+    ch = _voice_target(channel_id)
     if ch is None:
         return {"ok": False, "error": "음성채널을 찾을 수 없음"}
+    seconds = max(1.0, min(60.0, float(seconds or 5)))
+    _stop_countdown(ch.guild.id)
+    _countdowns[ch.guild.id] = asyncio.create_task(
+        _run_countdown(ch, seconds, rbt.voice_key(voice or DEFAULT_VOICE)))
+    log.info(f"[IPC countdown] {ch.name} {seconds:.1f}초")
+    return {"ok": True}
+
+
+async def _ipc_countdown_cancel(channel_id, text: str = None) -> dict:
+    ch = _voice_target(channel_id)
+    if ch is None:
+        return {"ok": False, "error": "음성채널을 찾을 수 없음"}
+    stopped = _stop_countdown(ch.guild.id)
+    log.info(f"[IPC countdown_cancel] {ch.name} | 진행 중이던 카운트 {'취소' if stopped else '없음'}")
+    if text:
+        return await _ipc_speak(text, None, channel_id)
+    return {"ok": True}
+
+
+# ── IPC (다른 봇이 음성 안내를 보낼 때: {"cmd":"speak","args":[텍스트, 목소리, 음성채널ID?]}) ──
+async def _ipc_speak(text: str, voice: str = None, channel_id=None) -> dict:
+    ch = _voice_target(channel_id)
+    if ch is None:
+        return {"ok": False, "error": "음성채널을 찾을 수 없음 (default_voice_channel_id 확인)"}
     if not await _enqueue(ch.guild, ch, text, rbt.voice_key(voice or DEFAULT_VOICE)):
         return {"ok": False, "error": "대기열 가득 참"}
     log.info(f"[IPC speak] {text[:60]}")
@@ -355,8 +461,14 @@ async def _ipc_handle(reader, writer):
         line = await asyncio.wait_for(reader.readline(), timeout=10)
         req = json.loads(line.decode("utf-8"))
         args = req.get("args") or []
-        if req.get("cmd") == "speak" and args and args[0]:
-            resp = await _ipc_speak(str(args[0]), args[1] if len(args) > 1 else None)
+        cmd = req.get("cmd")
+        if cmd == "speak" and args and args[0]:
+            resp = await _ipc_speak(str(args[0]), args[1] if len(args) > 1 else None,
+                                    args[2] if len(args) > 2 else None)
+        elif cmd == "countdown" and len(args) >= 2:
+            resp = await _ipc_countdown(args[0], args[1], args[2] if len(args) > 2 else None)
+        elif cmd == "countdown_cancel" and args:
+            resp = await _ipc_countdown_cancel(args[0], args[1] if len(args) > 1 else None)
         else:
             resp = {"ok": False, "error": f"알 수 없는 명령: {req.get('cmd')}"}
     except Exception as e:

@@ -251,6 +251,68 @@ def test_settlement_compute_and_button():
     assert btn.label == "정산 완료"
 
 
+def test_manual_close_countdown():
+    import asyncio
+    import tempfile
+
+    class _Log:
+        def info(self, *_):
+            pass
+
+    a = ba.BossAuction(None, channel_id=1, data_dir=tempfile.mkdtemp(), is_admin=lambda u: True, logger=_Log())
+    a.manual_close = True
+    a.discord_now = lambda: 2000.0
+    ids = lambda v: {getattr(c, "custom_id", ""): c for c in v.children}
+
+    def board_with(name):
+        return {"type": "board", "lots": [ba.make_lot(name, "", 100, 10, 5)], "status": "active", "current": None}
+
+    async def run():
+        # 입찰 없이 ⏱️ 마감 → 바로 유찰
+        b = board_with("반지")
+        ba.board_start_next(b, 1000.0, manual=True)
+        lot = ba.board_current(b)
+        assert lot["manual"] and ba.close_deadline(lot) is None        # 누르기 전엔 자동 마감 없음
+        assert "진행자 마감 대기" in ba.live_block(lot, now=1001.0)
+        assert ids(a.view_for(b))["boss_board_close"].disabled is False
+        a.store.save(1, b)
+        closed, note = await a.start_closing(1, 1002.0, by="운영진")
+        assert note == "nobid" and closed["status"] != "active" and not closed.get("bidder_id")
+        assert ba.board_state(a.store.get(1)) != "active"
+
+        # 입찰 → ⏱️ 마감 → 카운트 → 카운트 중 입찰 → 취소·계속 → 다시 마감
+        b = board_with("집행검")
+        ba.board_start_next(b, 1000.0, manual=True)
+        a.store.save(2, b)
+        lot = a.store.get(2)["lots"][0]
+        assert ba.apply_bid(lot, 7, "김", now=1001.0)[0]
+        bb = a.store.get(2); bb["lots"][0] = lot; a.store.save(2, bb)
+        _, err = await a.start_closing(2, 1002.0)                       # 입찰 잠금(3초) 중엔 거부
+        assert err and "확인하는 중" in err
+        started, note = await a.start_closing(2, 1005.0)
+        assert note == "" and started["closing_started_at"] == 1005.0
+        bb = a.store.get(2)
+        lot = ba.board_current(bb)
+        assert ba.close_deadline(lot) == 1010.0
+        assert "마감 카운트 중" in ba.live_block(lot, now=1007.0)
+        assert ids(a.view_for(bb))["boss_board_close"].disabled is True
+        _, err = await a.start_closing(2, 1006.0)
+        assert "이미" in err
+        ok, text = ba.apply_bid(lot, 8, "이", now=1008.0)
+        assert ok and "취소" in text and lot["closing_started_at"] is None and lot["countdown_resets"] == 1
+        assert ba.close_deadline(lot) is None and lot["status"] == "active"
+        for t in list(a._close_tasks.values()) + list(a._tick_tasks.values()):
+            t.cancel()
+
+    asyncio.run(run())
+    # 자동 모드(manual 아님)는 기존대로 입찰 후 자동 카운트, 마감 버튼 숨김
+    b = board_with("목걸이")
+    ba.board_start_next(b, 1000.0)
+    assert "boss_board_close" not in ids(a.view_for(b))
+    assert ba.close_deadline(ba.board_current(b)) == 1005.0
+    assert "boss_board_close" in ids(ba.BoardView(a))                   # 재시작 복구 등록용엔 항상 있음
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

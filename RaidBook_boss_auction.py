@@ -33,6 +33,7 @@ import discord
 from discord import ui
 
 from RaidBook_common import write_json_atomic
+from RaidBook_ipc import send_ipc
 
 CLOSE_GRACE_SEC = 0.8   # 마감 직전 클릭의 네트워크·처리 지연 허용 (판정은 클릭 시각 기준)
 REFRESH_DELAY_SEC = 0.3   # 잠금이 없을 때 최종 상태로 다시 그리기까지 최소 대기
@@ -90,6 +91,11 @@ def apply_bid(rec, uid, name, now=None):
     rec.setdefault("bid_history", []).append({"uid": str(uid), "name": name, "price": price,
                                               "ts": float(now if now is not None else time.time()),
                                               "at": datetime.now().isoformat(timespec="seconds")})
+    if rec.get("manual") and rec.get("closing_started_at"):
+        # 진행자 마감 카운트 중 입찰 → 카운트 취소, 경매 계속 (진행자가 다시 ⏱️ 마감을 눌러야 마감)
+        rec["closing_started_at"] = None
+        rec["countdown_resets"] = int(rec.get("countdown_resets", 0)) + 1
+        return True, f"🙋 {price:,} 입찰했어요. 마감 카운트가 취소되고 경매가 계속돼요."
     return True, f"🙋 {price:,} 입찰했어요."
 
 
@@ -125,9 +131,13 @@ def bid_history_text(rec, n=BID_HISTORY_SHOW):
 
 
 def close_deadline(rec):
-    """마감 예정 unix 시각. 입찰 없으면 시작 + 카운트, 입찰 후엔 마지막 입찰 + BID_SETTLE_SEC 대기 + 카운트. 진행 전이면 None."""
+    """마감 예정 unix 시각. 입찰 없으면 시작 + 카운트, 입찰 후엔 마지막 입찰 + BID_SETTLE_SEC 대기 + 카운트. 진행 전이면 None.
+    진행자 마감(manual) 아이템은 ⏱️ 경매 마감을 누른 순간 + 카운트, 누르기 전·카운트가 취소된 뒤엔 None (자동 마감 없음)."""
     if rec.get("status") != "active":
         return None
+    if rec.get("manual"):
+        started = rec.get("closing_started_at")
+        return float(started) + int(rec["countdown_sec"]) if started else None
     if rec.get("last_bid_at"):
         return float(rec["last_bid_at"]) + BID_SETTLE_SEC + int(rec["countdown_sec"])
     if not rec.get("started_ts"):
@@ -164,6 +174,15 @@ def live_block(rec, unit="", now=None):
     else:
         lines.append("### 💰 아직 입찰 없음")
     dl = close_deadline(rec)
+    if rec.get("manual") and not dl:
+        until = bid_lock_until(rec)
+        if until and now < until:
+            lines.append("## ⏳ 입찰 확인 중")
+        else:
+            lines.append("## ⏸️ 진행자 마감 대기")
+        lines.append(f"-# 진행자가 ⏱️ 경매 마감을 누르면 {int(rec['countdown_sec'])}초 카운트 · "
+                     f"카운트 중 입찰이 들어오면 카운트가 취소되고 경매가 계속돼요")
+        return "\n".join(lines)
     if dl:
         # Discord <t:R>은 1분 안쪽을 '몇 초 후'로만 보여 줘서 카운트가 멈춘 것처럼 보인다 —
         # 남은 초를 직접 적고, 진행 중에는 봇이 1초마다 다시 그린다 (BossAuction._ticker)
@@ -173,6 +192,9 @@ def live_block(rec, unit="", now=None):
         else:
             left = fmt_remaining(dl - now)
             lines.append(f"## ⏱️ 남은 시간 {left}" if left[0].isdigit() else f"## ⏱️ {left}")
+        if rec.get("manual"):
+            lines.append("-# 마감 카운트 중이에요 · 지금 입찰하면 카운트가 취소되고 경매가 계속돼요")
+            return "\n".join(lines)
         lines.append(f"-# 입찰이 들어오면 {BID_SETTLE_SEC}초 동안 입찰 버튼이 잠기고, 그 뒤 {int(rec['countdown_sec'])}초 카운트 · 새 입찰이 오면 다시 시작")
     return "\n".join(lines)
 
@@ -271,6 +293,8 @@ class BossAuction:
         # 진행판 생성·아이템 마감 등 경매 대기 목록이 바뀔 때 호출 (동기 콜백, 예약만 해야 함)
         self.on_change = None
         self.board_defaults = dict(DEFAULT_BOARD_DEFAULTS)   # 재경매 입력에서 숫자 생략 시
+        self.manual_close = False   # True: 진행판 아이템은 진행자가 ⏱️ 경매 마감을 눌러야 카운트 시작
+        self.tts_port = 0           # TTS 봇 IPC 포트 — 경매장 음성채널에서 마감 카운트를 읽는다 (0이면 소리 없음)
         self.settlements = SettlementStore(os.path.join(data_dir, "auction_settlements.json"), logger)
         self.settlement_config = dict(DEFAULT_SETTLEMENT)   # config "settlement" 블록
         self.get_names = None   # () → {uid: 표시 이름}
@@ -361,9 +385,62 @@ class BossAuction:
         until = self.lock_until(rec)
         locked = until is not None and self.discord_now() < until
         if (rec or {}).get("type") == "board":
+            lot = board_current(rec)
+            closing = "off"
+            if lot and lot.get("manual") and board_state(rec) == "active":
+                closing = "counting" if lot.get("closing_started_at") else "ready"
             return BoardView(self, state=board_state(rec), relist=board_can_relist(rec), locked=locked,
-                             settle=board_can_settle(rec), settled=bool(rec.get("settled_at")))
+                             settle=board_can_settle(rec), settled=bool(rec.get("settled_at")), closing=closing)
         return AuctionView(self, state=(rec or {}).get("status", "closed"), locked=locked)
+
+    async def _tts(self, cmd, args):
+        try:
+            res = await send_ipc(self.tts_port, cmd, args, timeout_connect=2, timeout_read=5)
+        except Exception as e:
+            res = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        if not (res or {}).get("ok"):
+            self.log.info(f"[경매 음성 {cmd}] TTS 봇 응답 없음: {(res or {}).get('error')}")
+
+    def voice(self, cmd, *args):
+        """경매장 음성채널 안내 (TTS 봇 IPC). 소리는 부가 기능이라 실패해도 경매 진행에는 영향 없음."""
+        if self.tts_port:
+            asyncio.ensure_future(self._tts(cmd, list(args)))
+
+    async def start_closing(self, mid, clicked, by=None):
+        """진행자 ⏱️ 경매 마감 — 지금부터 카운트. 반환: (lot | None, 안내문)."""
+        async with self.lock:
+            board = self.store.get(mid)
+            lot = board_current(board) if board else None
+            if not lot or board_state(board) != "active":
+                return None, "진행 중인 아이템이 없어요."
+            if not lot.get("manual"):
+                return None, "이 아이템은 입찰 후 자동 카운트로 마감돼요."
+            if lot.get("closing_started_at"):
+                return None, "이미 마감 카운트 중이에요."
+            until = bid_lock_until(lot)
+            if until and clicked < until:
+                return None, "⏳ 방금 입찰을 확인하는 중이에요. 잠시 뒤 다시 눌러 주세요."
+            if not lot.get("bidder_id"):
+                expected = (board.get("current"), lot.get("bid_count"))
+                no_bid = True
+            else:
+                no_bid = False
+        if no_bid:
+            # 입찰이 하나도 없으면 카운트 없이 바로 유찰
+            closed = await self.advance_board(mid, expected=expected, by=by)
+            return (closed, "nobid") if closed else (None, "방금 상태가 바뀌었어요. 다시 확인해 주세요.")
+        async with self.lock:
+            board = self.store.get(mid)
+            lot = board_current(board) if board else None
+            if not lot or board_state(board) != "active" or lot.get("closing_started_at"):
+                return None, "방금 상태가 바뀌었어요. 다시 확인해 주세요."
+            lot["closing_started_at"] = float(clicked)
+            self.safe_save(mid, board)
+            self._schedule_board(mid, board)
+            dl = close_deadline(lot)
+        self.voice("countdown", int(board.get("channel_id") or self.channel_id or 0),
+                   max(1.0, dl - self.discord_now()))
+        return lot, ""
 
     async def load_allowed(self, source_message_id):
         """원본 보스 알림의 참석자 UID 스냅샷 (Excel 조회는 스레드에서 — 입찰 반응 지연 방지)."""
@@ -698,7 +775,7 @@ class BossAuction:
                 return None, "지금 경매 중인 아이템이 있어요. 마감된 뒤 눌러 주세요."
             if allowed is not None:
                 board["allowed_uids"] = allowed
-            lot = board_start_next(board, start_ts)
+            lot = board_start_next(board, start_ts, manual=self.manual_close)
             self.store.save(mid, board)
         if lot is not None:
             self._schedule_board(mid, board)
@@ -739,6 +816,10 @@ class BossAuction:
             self.log.info(f"[진행판 메시지 갱신 실패] {mid}: {type(e).__name__}: {e}")
         if closed_lot or stop:
             self.notify_change()
+        if closed_lot and closed_lot.get("manual"):
+            said = (f"{lot_label(closed_lot)}, {closed_lot.get('bidder_name')}님 낙찰!" if closed_lot.get("bidder_id")
+                    else f"{lot_label(closed_lot)}, 유찰")
+            self.voice("speak", said, None, int(board.get("channel_id") or self.channel_id or 0))
         if closed_lot:
             self.log.info(f"[진행판 마감] {lot_label(closed_lot)} | 낙찰 {closed_lot.get('bidder_name') or '유찰'} "
                           f"{int(closed_lot.get('current_price') or 0):,} | 입찰 {closed_lot.get('bid_count', 0)}회 | msg {mid}")
@@ -1180,12 +1261,15 @@ def board_current(board):
     return lots[idx]
 
 
-def board_start_next(board, start_ts):
-    """다음 대기 lot 을 start_ts 에 시작하도록 활성화. 남은 lot 이 없으면 진행판 종료. 반환: lot 또는 None."""
+def board_start_next(board, start_ts, manual=False):
+    """다음 대기 lot 을 start_ts 에 시작하도록 활성화. 남은 lot 이 없으면 진행판 종료. 반환: lot 또는 None.
+    manual=True: 자동 마감 없이 진행자가 ⏱️ 경매 마감을 눌러야 카운트가 시작된다."""
     for i, lot in enumerate(board.get("lots") or []):
         if lot.get("status") == "pending":
             lot["status"] = "active"
             lot["started_ts"] = float(start_ts)
+            lot["manual"] = bool(manual)
+            lot["closing_started_at"] = None
             board["current"] = i
             return lot
     board["current"] = None
@@ -1481,8 +1565,10 @@ class BoardView(ui.View):
     """경매 진행판 버튼 (persistent): ▶️ 경매시작 (관리자, 아이템마다) / 🙋 입찰 / ⏹️ 종료 (관리자)
     / 🔁 유찰 재경매 (관리자, 끝난 뒤 유찰 아이템만 새 진행판으로)."""
 
-    def __init__(self, auction: BossAuction, state="waiting", relist=False, locked=False, settle=None, settled=False):
-        """settle=None: 재시작 복구 등록용 — 버튼을 모두 둔다. False면 💰 정산 버튼을 아예 뺀다 (진행 중·유찰)."""
+    def __init__(self, auction: BossAuction, state="waiting", relist=False, locked=False, settle=None, settled=False,
+                 closing=None):
+        """settle=None: 재시작 복구 등록용 — 버튼을 모두 둔다. False면 💰 정산 버튼을 아예 뺀다 (진행 중·유찰).
+        closing: None 등록용 / 'off' ⏱️ 경매 마감 버튼 뺌 / 'ready' 누를 수 있음 / 'counting' 카운트 중 (비활성)."""
         super().__init__(timeout=None)
         self.auction = auction
         for child in list(self.children):
@@ -1502,6 +1588,11 @@ class BoardView(ui.View):
                     self.remove_item(child)
                 elif settled:
                     child.label, child.style = "정산 완료", discord.ButtonStyle.secondary
+            elif cid == "boss_board_close":
+                if closing == "off":
+                    self.remove_item(child)
+                elif closing == "counting":
+                    child.disabled, child.label = True, "마감 카운트 중"
 
     @ui.button(label="경매시작", emoji="▶️", style=discord.ButtonStyle.primary, custom_id="boss_board_start")
     async def start_btn(self, interaction: discord.Interaction, button: ui.Button):
@@ -1522,6 +1613,28 @@ class BoardView(ui.View):
         await interaction.response.edit_message(embed=build_board_embed(board, a.currency, a.discord_now()),
                                                 view=a.view_for(board))
         a.log.info(f"[진행판 시작] {lot_label(lot)} | by {interaction.user.display_name} | msg {mid}")
+
+    @ui.button(label="경매 마감", emoji="⏱️", style=discord.ButtonStyle.danger, custom_id="boss_board_close")
+    async def close_btn(self, interaction: discord.Interaction, button: ui.Button):
+        a = self.auction
+        if not a.is_admin(interaction.user):
+            await interaction.response.send_message("⛔ 진행자(관리자)만 경매를 마감할 수 있어요.", ephemeral=True)
+            return
+        mid = interaction.message.id
+        await interaction.response.defer()
+        lot, err = await a.start_closing(mid, a.click_ts(interaction), by=interaction.user.display_name)
+        if lot is None:
+            await interaction.followup.send(err, ephemeral=True)
+            return
+        if err == "nobid":
+            # advance_board 가 메시지를 이미 유찰 화면으로 갱신함
+            await interaction.followup.send(f"📭 **{lot_label(lot)}** 입찰이 없어 유찰 처리했어요.", ephemeral=True)
+            a.log.info(f"[진행판 유찰] {lot_label(lot)} 입찰 없음 → 마감 | by {interaction.user.display_name} | msg {mid}")
+            return
+        board = a.store.get(mid)
+        await interaction.edit_original_response(embed=build_board_embed(board, a.currency, a.discord_now()),
+                                                 view=a.view_for(board))
+        a.log.info(f"[진행판 마감 카운트] {lot_label(lot)} {lot['countdown_sec']}초 | by {interaction.user.display_name} | msg {mid}")
 
     @ui.button(label="입찰", emoji="🙋", style=discord.ButtonStyle.success, custom_id="boss_board_bid")
     async def bid_btn(self, interaction: discord.Interaction, button: ui.Button):
@@ -1548,10 +1661,14 @@ class BoardView(ui.View):
                 elif not a.can_bid(board, interaction.user.id):
                     reject = "🔐 이 경매는 해당 보스탐 참석자만 입찰할 수 있어요."
                 else:
+                    was_counting = bool(lot.get("closing_started_at"))
                     ok, text = apply_bid(lot, interaction.user.id, interaction.user.display_name, now=clicked)
                     if not ok:
                         reject = text
                     else:
+                        if was_counting and not lot.get("closing_started_at"):
+                            a.voice("countdown_cancel", int(board.get("channel_id") or a.channel_id or 0),
+                                    "입찰! 마감 취소")
                         a.safe_save(mid, board)
                         a._schedule_board(mid, board)
                         label, price, count = lot_label(lot), int(lot["current_price"]), lot["bid_count"]

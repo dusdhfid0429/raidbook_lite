@@ -41,6 +41,13 @@ def test_speech_text():
     assert rbt.speech_text("동훈", "집합", read_name=False) == "집합"
 
 
+def test_countdown_plan():
+    assert rbt.count_word(5) == "다섯" and rbt.count_word(1) == "하나" and rbt.count_word(15) == "15"
+    assert rbt.countdown_plan(5) == [(0.0, 5), (1.0, 4), (2.0, 3), (3.0, 2), (4.0, 1)]
+    plan = rbt.countdown_plan(3.4)          # 늦게 시작 → 셋부터, 마지막 "하나"는 마감 1초 전
+    assert [n for _, n in plan] == [3, 2, 1] and abs(plan[0][0] - 0.4) < 1e-9 and abs(plan[-1][0] - 2.4) < 1e-9
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):
