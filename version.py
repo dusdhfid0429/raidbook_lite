@@ -7,7 +7,7 @@ from datetime import datetime
 # 버전 정보
 VERSION_MAJOR = 1
 VERSION_MINOR = 0
-VERSION_PATCH = 27
+VERSION_PATCH = 28
 VERSION_BUILD = 1
 
 # 버전 문자열
@@ -16,7 +16,7 @@ VERSION_FULL = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}.{VERSION_BUILD}
 
 # 릴리즈 정보
 RELEASE_DATE = "2026-10-29"
-RELEASE_NAME = "Lite - 마감 시각 기준 마감 트리거, 마감됨 표시"
+RELEASE_NAME = "Lite - 음악 재생 패널 볼륨 버튼"
 RELEASE_CHANNEL = "stable"  # stable, beta, alpha
 
 # 제품 정보
