@@ -99,6 +99,14 @@ def apply_bid(rec, uid, name, now=None):
     return True, f"🙋 {price:,} 입찰했어요."
 
 
+def bid_success_text(label, price, currency="", applied=""):
+    """입찰 성공 시 본인에게만 보내는 확인 문구 (금액은 본인 ephemeral 에만)."""
+    out = f"✅ **{label}** {int(price):,}{' ' + currency if currency else ''} 입찰 완료 — 지금 최고 입찰자예요."
+    if "취소" in (applied or ""):
+        out += "\n-# 마감 카운트가 취소되고 경매가 계속돼요."
+    return out
+
+
 BID_HISTORY_SHOW = 5
 BID_SETTLE_SEC = 3   # 입찰 후 이만큼 기다렸다가 마감 카운트 시작 (연타 몰림 정리 시간)
 
@@ -335,6 +343,15 @@ class BossAuction:
             await interaction.message.edit(**kwargs)
         except Exception as e:
             self.log.info(f"[경매 메시지 수정 실패] {type(e).__name__}: {e}")
+
+    def notify_bidder(self, interaction, text):
+        """입찰 성공 확인을 누른 사람에게만 (ephemeral). 화면 갱신 응답 뒤에 따로 보내 판정·응답 속도에 영향 없음."""
+        async def _send():
+            try:
+                await interaction.followup.send(text, ephemeral=True)
+            except Exception as e:
+                self.log.info(f"[입찰 확인 메시지 실패] {type(e).__name__}: {e}")
+        asyncio.ensure_future(_send())
 
     def schedule_refresh(self, message, delay=None):
         """저장된 최신 상태로 메시지를 한 번 더 그린다 — 입찰 잠금이 풀리는 순간(카운트 시작)에 맞춰 버튼을 다시 연다.
@@ -937,6 +954,7 @@ class AuctionView(ui.View):
                         a.safe_save(mid, rec)
                         a._schedule_close(mid, rec)
                         price, count = int(rec["current_price"]), rec["bid_count"]
+                        done_text = bid_success_text(rec.get("item"), price, a.currency, text)
         if reject:
             await a.respond_ephemeral(interaction, reject)
             return
@@ -944,6 +962,7 @@ class AuctionView(ui.View):
                    f"{price:,} | {count}회 | msg {mid}")
         latest = a.store.get(mid) or rec   # 응답 순서가 뒤바뀌어도 항상 최신 상태로 그린다
         await a.respond_edit(interaction, embed=build_embed(latest, a.currency), view=a.view_for(latest))
+        a.notify_bidder(interaction, done_text)
         a.schedule_refresh(interaction.message)   # 연타 뒤 최종 입찰자로 확정 표시
 
     @ui.button(label="경매종료", emoji="⏹️", style=discord.ButtonStyle.secondary, custom_id="boss_auc_stop")
@@ -1672,6 +1691,7 @@ class BoardView(ui.View):
                         a.safe_save(mid, board)
                         a._schedule_board(mid, board)
                         label, price, count = lot_label(lot), int(lot["current_price"]), lot["bid_count"]
+                        done_text = bid_success_text(label, price, a.currency, text)
         if reject:
             await a.respond_ephemeral(interaction, reject)
             return
@@ -1681,6 +1701,7 @@ class BoardView(ui.View):
         if latest:
             await a.respond_edit(interaction, embed=build_board_embed(latest, a.currency, a.discord_now()),
                                  view=a.view_for(latest))
+        a.notify_bidder(interaction, done_text)
         a.schedule_refresh(interaction.message)   # 연타 뒤 최종 입찰자로 확정 표시
 
     @ui.button(label="종료", emoji="⏹️", style=discord.ButtonStyle.secondary, custom_id="boss_board_stop")
