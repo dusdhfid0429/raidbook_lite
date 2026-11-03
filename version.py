@@ -7,7 +7,7 @@ from datetime import datetime
 # 버전 정보
 VERSION_MAJOR = 1
 VERSION_MINOR = 0
-VERSION_PATCH = 29
+VERSION_PATCH = 30
 VERSION_BUILD = 1
 
 # 버전 문자열
@@ -15,8 +15,8 @@ VERSION = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}"
 VERSION_FULL = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}.{VERSION_BUILD}"
 
 # 릴리즈 정보
-RELEASE_DATE = "2026-11-02"
-RELEASE_NAME = "Lite - 경매 진행자 마감 버튼 + 음성 카운트, 입찰 확인 메시지"
+RELEASE_DATE = "2026-11-03"
+RELEASE_NAME = "Lite - 인원체크 혈맹별(정도/슈퍼맨) 구분 표시"
 RELEASE_CHANNEL = "stable"  # stable, beta, alpha
 
 # 제품 정보
