@@ -50,6 +50,7 @@ jobs:
           python Tests/test_manual_close_burst.py
           python Tests/test_music.py
           python Tests/test_tts.py
+          python Tests/test_clans.py
 
       - name: Install Inno Setup
         shell: pwsh

@@ -23,6 +23,7 @@ python Tests/test_bid_burst.py
 python Tests/test_manual_close_burst.py
 python Tests/test_music.py
 python Tests/test_tts.py
+python Tests/test_clans.py
 python -m pyflakes *.py
 ```
 

@@ -1,0 +1,60 @@
+# -*- coding: utf-8 -*-
+"""RaidBook_clans 테스트 — 참석자 혈맹별 묶음 표시."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import RaidBook_clans as rbc  # noqa: E402
+
+ROLES = {
+    "홍길동": {"정도"}, "김철수": {"정도", "운영진"}, "최강": {"슈퍼맨"},
+    "양다리": {"정도", "슈퍼맨"}, "손님": set(),
+}
+
+
+def test_parse_roles():
+    assert rbc.parse_clan_roles(None) == [("정도", "⚔️"), ("슈퍼맨", "🦸")]
+    assert rbc.parse_clan_roles([]) == []
+    assert rbc.parse_clan_roles(["A", {"role": "B", "emoji": "🅱"}, "A", ""]) == [("A", ""), ("B", "🅱")]
+
+
+def test_split_names():
+    assert rbc.split_names("없음") == []
+    assert rbc.split_names("") == []
+    assert rbc.split_names("a, b") == ["a", "b"]
+
+
+def test_group_and_format():
+    clans = rbc.parse_clan_roles(None)
+    names = ["홍길동", "최강", "김철수", "양다리", "손님", "모름"]
+    groups, unassigned = rbc.group_by_clan(names, clans, lambda n: ROLES.get(n, set()))
+    assert groups == [("정도", "⚔️", ["홍길동", "김철수", "양다리 ⚠️"]), ("슈퍼맨", "🦸", ["최강"])], groups
+    assert unassigned == ["손님", "모름"]
+    block = rbc.format_clan_block("✅ 현재 참석", 6, groups, unassigned)
+    assert block == ("✅ 현재 참석: 총 6명\n"
+                     "⚔️ 정도 (3명) | 홍길동, 김철수, 양다리 ⚠️\n"
+                     "🦸 슈퍼맨 (1명) | 최강\n"
+                     "❔ 미지정 (2명) | 손님, 모름"), block
+    assert rbc.format_clan_counts(groups, unassigned) == "정도 3 · 슈퍼맨 1 · 미지정 2"
+
+
+def test_empty_clan_and_no_unassigned():
+    clans = rbc.parse_clan_roles(None)
+    groups, unassigned = rbc.group_by_clan(["최강"], clans, lambda n: ROLES.get(n, set()))
+    block = rbc.format_clan_block("✅ 최종 참석", 1, groups, unassigned)
+    assert block == "✅ 최종 참석: 총 1명\n⚔️ 정도 (0명) | 없음\n🦸 슈퍼맨 (1명) | 최강", block
+
+
+def test_lookup_error_is_unassigned():
+    def boom(_):
+        raise RuntimeError("x")
+    groups, unassigned = rbc.group_by_clan(["a"], rbc.parse_clan_roles(None), boom)
+    assert unassigned == ["a"] and all(not g[2] for g in groups)
+
+
+if __name__ == "__main__":
+    for name, fn in list(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+            print(f"{name} OK")

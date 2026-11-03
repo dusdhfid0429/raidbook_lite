@@ -29,6 +29,8 @@
   "auction_defaults": "10만 1만 5초",
   "auction_pending_list": true,
   "party_enabled": false,
+  "clan_roles": [{"role": "정도", "emoji": "⚔️"}, {"role": "슈퍼맨", "emoji": "🦸"}],
+  "_clan_roles_comment": "혈맹 구분 역할 — 보스 알림 참석자를 이 역할별로 묶어 표시 (위에 적힌 순서대로). 역할이 둘 다 있으면 앞 혈맹에 ⚠️ 표시, 없으면 미지정. 빈 목록 []이면 구분 끔",
   "_auction_defaults_comment": "진행판 기본값 '시작가 호가 카운트' — 입력 창에 미리 채워지고, 줄마다 숫자를 생략하면 이 값 사용",
   "auction_channel_id": null,
   "auction_channel_voice": true,

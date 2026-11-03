@@ -34,6 +34,7 @@ from RaidBook_ipc import send_ipc, write_json_response
 from RaidBook_images import normalized_image_file_args, parse_canvas_size
 import RaidBook_schedule as rb_schedule
 import RaidBook_attendance as rb_att
+import RaidBook_clans as rb_clans
 from RaidBook_boss_data import (
     ensure_loot_sheet as _ensure_loot_sheet_core,
     load_all_loot as _load_all_loot_core,
@@ -298,6 +299,9 @@ LOOT_ANNOUNCE = bool(config.get("loot_announce", not config.get("loot_auction_bu
 LOOT_AUCTION_BUTTON = bool(config.get("loot_auction_button", False))
 # 자동 파티 편성 — 꺼져 있으면 파티확인 버튼을 숨기고 파티 편성/미편성 대신 참석자로 통합 표시 (코드는 유지)
 PARTY_ENABLED = bool(config.get("party_enabled", False))
+# 혈맹 구분 — 참석자를 이 역할별로 묶어 표시 (키 없으면 정도·슈퍼맨, 빈 목록이면 끔).
+# 서버에 이 역할이 하나도 없으면 예전처럼 한 줄로 표시
+CLAN_ROLES = rb_clans.parse_clan_roles(config.get("clan_roles"))
 # 구버전 방식: 전리품 공지 메시지의 🔨 경매시작 버튼 → 세팅 입력 → ▶️ 시작 (기본 꺼짐)
 LOOT_AUCTION_LEGACY = bool(config.get("loot_auction_legacy", False))
 # 진행판 기본값 "시작가 호가 카운트" (입력 창에 미리 채워짐)
@@ -2413,6 +2417,7 @@ class AttendView(ui.View):
             else:
                 added, total, removed = result
                 text = f"🎙️ 음성채널 인원체크 완료 — 신규 {added}명, 제외 {removed}명, 총 {total}명"
+                text += _clan_summary_for(interaction.message.id)
         log.info(f"[인원체크 버튼] msg:{interaction.message.id} user:{interaction.user.id} | {result}")
         try:
             await interaction.followup.send(text, ephemeral=True)
@@ -2825,6 +2830,62 @@ def _embed_line_boss_time(line):
     return m.group(1) if m else ""
 
 
+def _clan_guild():
+    """혈맹 역할을 조회할 서버 — 알림 채널의 서버, 없으면 guild_id, 그래도 없으면 유일한 서버."""
+    ch = bot.get_channel(ALERT_CHANNEL_ID) if ALERT_CHANNEL_ID else None
+    if ch is not None and getattr(ch, "guild", None) is not None:
+        return ch.guild
+    gid = config.get("guild_id")
+    if gid:
+        g = bot.get_guild(int(gid))
+        if g is not None:
+            return g
+    return bot.guilds[0] if len(bot.guilds) == 1 else None
+
+
+def _clan_split(names):
+    """참석자 이름 문자열 → (혈맹별 그룹, 미지정) / 혈맹 구분을 안 쓰면 None.
+    이름 → UID는 user_mapping(인원체크 때 기록), 없으면 서버 표시 이름으로 찾는다."""
+    if not CLAN_ROLES:
+        return None
+    guild = _clan_guild()
+    if guild is None:
+        return None
+    if not any(r.name.strip() in {n for n, _ in CLAN_ROLES} for r in guild.roles):
+        return None
+    name_to_uid = _name_to_uid_mapping()
+
+    def roles_of(person):
+        member = None
+        uid = name_to_uid.get(person) or (person if str(person).isdigit() else None)
+        if uid:
+            try:
+                member = guild.get_member(int(uid))
+            except (TypeError, ValueError):
+                member = None
+        if member is None:
+            member = guild.get_member_named(person)
+        return {r.name.strip() for r in member.roles} if member is not None else set()
+
+    return rb_clans.group_by_clan(rb_clans.split_names(names), CLAN_ROLES, roles_of)
+
+
+def clan_count_summary(attendee_ids) -> str:
+    """관리자 확인 메시지용 ' (정도 4 · 슈퍼맨 2 · 미지정 1)' — 혈맹 구분을 안 쓰면 빈 문자열."""
+    id_to_name = _load_id_to_name_mapping()
+    clan = _clan_split(", ".join(id_to_name.get(str(u), str(u)) for u in attendee_ids))
+    return f" ({rb_clans.format_clan_counts(*clan)})" if clan else ""
+
+
+def _clan_summary_for(message_id) -> str:
+    info = load_active_messages().get(str(message_id)) or {}
+    try:
+        return clan_count_summary(info.get("attendees", []))
+    except Exception as e:
+        log.info(f"[혈맹 집계 실패] {message_id}: {type(e).__name__}: {e}")
+        return ""
+
+
 def make_attend_embed(boss_name, count, names, boss_time=None, expired=False, loot="",
                       disable_time=None, thumbnail_file=None, image_url="", image_filename="",
                       confirmed_names=None, late_names=None, confirmed_at="", countdown_text="",
@@ -2863,7 +2924,16 @@ def make_attend_embed(boss_name, count, names, boss_time=None, expired=False, lo
         if confirmed_at:
             attendee_block += f"\n🔐 파티 확정: **{confirmed_at}**"
     else:
-        attendee_block = f"✅ {'최종' if expired else '현재'} 참석: {count}명 | {names}"
+        prefix = f"✅ {'최종' if expired else '현재'} 참석"
+        try:
+            clan = _clan_split(names)
+        except Exception as e:   # 역할 조회 실패해도 알림은 예전 형식으로 그린다
+            log.info(f"[혈맹 구분 실패] {type(e).__name__}: {e}")
+            clan = None
+        if clan:
+            attendee_block = rb_clans.format_clan_block(prefix, count, *clan)
+        else:
+            attendee_block = f"{prefix}: {count}명 | {names}"
 
     desc = (
         (f"{time_line}\n" if time_line else "")
@@ -6054,7 +6124,7 @@ async def voicecheck(ctx, message_id: str = None):
             lines.append(f"❌ `{mid}` — 진행 중인 알림이 아니에요.")
         else:
             lines.append(f"🎙 **{info.get('boss_name', '?')}** {info.get('boss_time', '')} — "
-                         f"{result[0]}명 추가 (총 {result[1]}명)")
+                         f"{result[0]}명 추가 (총 {result[1]}명){_clan_summary_for(mid)}")
     await ctx.send((f"🎙 <#{vc.id}> 기준\n" + "\n".join(lines))[:1990])
 
 
