@@ -92,6 +92,22 @@ def test_add_missing_roles():
     assert rbc.add_missing_roles([]) [1] == ["정도", "슈퍼맨", "썰자", "방다빼", "복덕방"]
 
 
+def test_convert_legacy_description():
+    one = "⏰ 리젠 21:00\n\n✅ 최종 참석: 3명 | [정도]a/기사/90, b, c\n\n🎁 **획득 아이템**: 반지"
+    desc, names = rbc.convert_legacy_description(one)
+    assert desc == "⏰ 리젠 21:00\n\n✅ 최종 참석: 총 3명\n\n🎁 **획득 아이템**: 반지", desc
+    assert names == ["[정도]a/기사/90", "b", "c"]
+    v30 = ("⏰ 리젠 21:00\n\n✅ 최종 참석: 총 4명\n⚔️ 정도 (2명) | a, b ⚠️\n🦸 슈퍼맨 (0명) | 없음\n"
+           "❔ 미지정 (2명) | c, d")
+    desc, names = rbc.convert_legacy_description(v30)
+    assert desc == "⏰ 리젠 21:00\n\n✅ 최종 참석: 총 4명", desc
+    assert names == ["a", "b", "c", "d"], names
+    assert rbc.convert_legacy_description("✅ 현재 참석: 0명 | 없음") == ("✅ 현재 참석: 총 0명", [])
+    new = "⏰ 리젠 21:00\n\n✅ 최종 참석: 총 4명\n\n🎁 **획득 아이템**: 반지"
+    assert rbc.convert_legacy_description(new) is None
+    assert rbc.convert_legacy_description("") is None
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

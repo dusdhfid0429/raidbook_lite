@@ -3487,6 +3487,66 @@ async def _repair_closed_alert_buttons(limit=300):
         log.info(f"[마감 버튼 정리] 마감된 알림 {fixed}개의 버튼을 정리했어요 (인원체크 끄기·인원 추가/제거 버튼)")
 
 
+async def _convert_legacy_alert_format(limit=300):
+    """예전 형식(쉼표로 이어진 참석 명단)으로 남아 있는 알림을 혈맹별 칸 형식으로 바꾼다.
+    본문에 적힌 명단을 그대로 옮기므로 Excel을 읽지 않고, 보스·시간·득템 등 나머지 내용은 그대로 둔다.
+    새 형식 알림은 건드리지 않으니 시작할 때마다 돌아도 같은 결과."""
+    if _clan_split("") is None:
+        return   # 혈맹 구분을 안 쓰는 서버
+    try:
+        ch = bot.get_channel(ALERT_CHANNEL_ID) or await bot.fetch_channel(ALERT_CHANNEL_ID)
+    except Exception as e:
+        log.info(f"[알림 형식 변환] 알림 채널 조회 실패: {type(e).__name__}: {e}")
+        return
+    converted = 0
+    try:
+        async for msg in ch.history(limit=limit):
+            if msg.author.id != bot.user.id or not msg.embeds:
+                continue
+            old = msg.embeds[0]
+            if "보스 출현 알림" not in (old.title or ""):
+                continue
+            result = rb_clans.convert_legacy_description(old.description)
+            if result is None:
+                continue
+            desc, names = result
+            clan = _clan_split(", ".join(names))
+            if clan is None:
+                continue
+            async with _alert_lock(msg.id):   # 진행 중 알림의 인원체크와 겹치지 않게
+                embed = old.copy()
+                embed.description = desc
+                keep = [(f.name, f.value, f.inline) for f in old.fields]
+                embed.clear_fields()
+                for name, value in rb_clans.clan_fields(*clan):
+                    embed.add_field(name=name, value=value, inline=False)
+                for name, value, inline in keep:
+                    embed.add_field(name=name, value=value, inline=inline)
+                # 첨부 이미지는 attachment:// 로 다시 걸어야 CDN 주소 만료 후에도 보인다
+                image_filename, _ = _message_image_ref(msg)
+                kwargs = {}
+                if image_filename:
+                    embed.set_image(url=None)
+                    embed.set_thumbnail(url=None)
+                    _apply_embed_image(embed, image_filename=image_filename)
+                    kwargs["attachments"] = list(msg.attachments)
+                try:
+                    await msg.edit(embed=embed, **kwargs)
+                    converted += 1
+                except Exception as e:
+                    log.info(f"[알림 형식 변환] {msg.id} 수정 실패: {type(e).__name__}: {e}")
+            await asyncio.sleep(1)   # 여러 개를 한꺼번에 고칠 때 디스코드 속도 제한 여유
+    except Exception as e:
+        log.info(f"[알림 형식 변환] 기록 조회 실패: {type(e).__name__}: {e}")
+    if converted:
+        log.info(f"[알림 형식 변환] 예전 알림 {converted}개를 혈맹별 형식으로 바꿨어요")
+
+
+async def _startup_alert_repairs():
+    await _repair_closed_alert_buttons()
+    await _convert_legacy_alert_format()
+
+
 async def _close_sweep_loop():
     while True:
         await asyncio.sleep(60)
@@ -5900,7 +5960,7 @@ async def initialize_on_ready():
     global _close_sweep_task
     if _close_sweep_task is None or _close_sweep_task.done():
         _close_sweep_task = asyncio.ensure_future(_close_sweep_loop())
-        asyncio.ensure_future(_repair_closed_alert_buttons())
+        asyncio.ensure_future(_startup_alert_repairs())
     global _pending_loop_task
     if PENDING_LIST_ENABLED and (_pending_loop_task is None or _pending_loop_task.done()):
         _pending_loop_task = asyncio.ensure_future(_pending_refresh_loop())

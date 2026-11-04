@@ -3,6 +3,7 @@
 
 디스코드 의존 없는 순수 로직 (보스봇이 멤버 → 역할 이름 조회 함수를 넘겨 준다).
 """
+import re
 
 DEFAULT_CLAN_ROLES = [
     {"role": "정도", "emoji": "⚔️"},
@@ -144,3 +145,34 @@ def clan_fields(groups, unassigned) -> list:
         for i, chunk in enumerate(_chunk_joined(shorts)):
             out.append((f"{label} {len(people)}명" if i == 0 else "\u200b", chunk))
     return out
+
+
+_LEGACY_ONE_LINE = re.compile(r"^(✅ (?:최종|현재) 참석): (\d+)명 \| (.*)$")
+_LEGACY_TOTAL = re.compile(r"^(✅ (?:최종|현재) 참석): 총 (\d+)명$")
+_LEGACY_CLAN_LINE = re.compile(r"^.+ \((\d+)명\) \| (.*)$")
+
+
+def convert_legacy_description(description):
+    """예전 형식 알림 본문 → (새 본문, 참석자 이름 목록) / 예전 형식이 아니면 None.
+    예전 형식: '✅ 최종 참석: 3명 | a, b, c' 한 줄, 또는 '✅ 최종 참석: 총 3명' 아래 '⚔️ 정도 (2명) | a, b ⚠️' 줄들.
+    새 본문에는 '✅ 최종 참석: 총 N명'만 남기고 명단은 혈맹 칸(필드)으로 옮긴다."""
+    lines = str(description or "").split("\n")
+    for i, line in enumerate(lines):
+        m = _LEGACY_ONE_LINE.match(line)
+        if m:
+            names = split_names(m.group(3))
+            return "\n".join(lines[:i] + [f"{m.group(1)}: 총 {m.group(2)}명"] + lines[i + 1:]), names
+        m = _LEGACY_TOTAL.match(line)
+        if m:
+            j, names = i + 1, []
+            while j < len(lines):
+                cm = _LEGACY_CLAN_LINE.match(lines[j])
+                if not cm:
+                    break
+                names += [n[:-len(BOTH_ROLES_MARK)] if n.endswith(BOTH_ROLES_MARK) else n
+                          for n in split_names(cm.group(2))]
+                j += 1
+            if j == i + 1:
+                return None   # 이미 새 형식 (명단은 필드에)
+            return "\n".join(lines[:i + 1] + lines[j:]), names
+    return None
