@@ -250,6 +250,19 @@ if "settlement" not in config:
     except Exception as e:
         log.info(f"[설정] 정산 비율 기본값 저장 실패 (기본값으로 동작): {e}")
 
+# 두 혈맹이 서버를 같이 쓰면서 슈퍼맨 혈맹 운영진('슈퍼맨운영진' 역할)도 인원체크·경매 관리자 — 예전 설치판에 한 번만 추가
+if not config.get("_superman_admin_applied"):
+    _names = list(config.get("admin_role_names", ["운영진", "슈퍼맨운영진"]) or [])
+    if "슈퍼맨운영진" not in _names:
+        _names.append("슈퍼맨운영진")
+    config["admin_role_names"] = _names
+    config["_superman_admin_applied"] = True
+    try:
+        write_json_atomic(CONFIG_PATH, config, log)
+        log.info(f"[설정] 관리자 역할에 '슈퍼맨운영진' 추가 (admin_role_names: {', '.join(_names)})")
+    except Exception as e:
+        log.info(f"[설정] 관리자 역할 추가 저장 실패 (이번 실행만 적용): {e}")
+
 # 마감 기본값을 '리젠 정각 마감'(close_minutes 0)으로 바꿨다 — 예전 설치판 값은 한 번만 0으로 맞추고, 이후 운영진이 고친 값은 그대로 둔다
 if not config.get("_close_at_spawn_applied"):
     _old_cm = config.get("close_minutes")
@@ -284,7 +297,7 @@ LOOT_CHANNEL_ID = config.get("loot_channel_id", COMMAND_CHANNEL_ID)
 # 슬래시 명령 사용 허용 역할 (서버 관리 권한 보유자는 항상 허용)
 ADMIN_ROLE_IDS = {int(r) for r in (config.get("admin_role_ids") or []) if r}
 # 역할 이름으로도 관리자 판정 (서버에서 '운영진' 역할을 주면 바로 인원체크·경매·정산 사용 가능)
-ADMIN_ROLE_NAMES = {str(n).strip() for n in (config.get("admin_role_names", ["운영진"]) or []) if str(n).strip()}
+ADMIN_ROLE_NAMES = {str(n).strip() for n in (config.get("admin_role_names", ["운영진", "슈퍼맨운영진"]) or []) if str(n).strip()}
 # 음성채널 인원체크 대상 채널 (비우면 서버의 모든 음성채널, AFK 채널 제외)
 VOICE_CHANNEL_IDS = [int(c) for c in (config.get("voice_channel_ids") or []) if c]
 # 보스 출현 정각에 음성채널 접속자를 자동 참석 처리
@@ -3529,7 +3542,7 @@ async def on_message(message):
 
 def _is_bot_admin(member) -> bool:
     """명령 사용 권한: 서버 소유자, 서버 관리/관리자 권한, 또는 관리자 역할 보유
-    (config admin_role_ids 의 역할 ID, admin_role_names 의 역할 이름 — 기본 '운영진')."""
+    (config admin_role_ids 의 역할 ID, admin_role_names 의 역할 이름 — 기본 '운영진', '슈퍼맨운영진')."""
     if not isinstance(member, discord.Member):
         return False
     if member.guild is not None and member.id == member.guild.owner_id:
