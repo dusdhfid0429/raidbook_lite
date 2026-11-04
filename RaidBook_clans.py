@@ -79,42 +79,55 @@ def format_clan_counts(groups, unassigned) -> str:
 FIELD_LIMIT = 1024   # 디스코드 embed 필드 값 최대 길이
 
 
-def strip_clan_tag(person, clan_name) -> str:
-    """혈맹 칸 안에서는 이름 앞 혈맹 표기를 뺀다: '[정도]투신/기사/90' · '@[정도] 투신' · '정도/기사/x' → 나머지.
-    빼고 나면 빈 이름이 되면 원래 이름 그대로."""
-    text = str(person)
-    body = text.lstrip("@").lstrip()
-    for tag in (f"[{clan_name}]", f"{clan_name}/"):
-        if body.startswith(tag):
-            rest = body[len(tag):].strip()
-            return rest or text
-    return text
+# 닉네임 뒤에 붙는 직업 표기 — 짧은 이름을 고를 때 건너뛴다
+CLASS_WORDS = {"기사", "요정", "법사", "군주", "다엘", "다크엘프", "용기사", "환술사", "전사", "검사",
+               "창기사", "광전사", "창술사", "벌"}
+NAME_SEP = " · "
 
 
-def _chunk_lines(lines, limit=FIELD_LIMIT) -> list:
-    """한 줄에 한 명 목록을 필드 길이 제한에 맞춰 여러 덩어리로."""
+def short_name(person, clan_names=()) -> str:
+    """폰에서 짧게 보이도록 닉네임만: '[정도]투신(애마)/기사/90' → '투신(애마)', '[슈퍼맨]빼쥬 법사 88' → '빼쥬'.
+    혈맹 표기·직업·숫자 조각은 건너뛰고 첫 이름 조각을 쓴다 (전부 직업이면 첫 조각, 아무것도 없으면 원래 이름)."""
+    text = str(person).strip()
+    body = text.lstrip("@").strip()
+    for clan in clan_names:
+        for tag in (f"[{clan}]", f"{clan}/"):
+            if body.startswith(tag):
+                body = body[len(tag):].strip()
+    warn = body.endswith(BOTH_ROLES_MARK.strip())
+    if warn:
+        body = body[:-len(BOTH_ROLES_MARK.strip())].strip()
+    tokens = [t for t in body.replace("/", " ").split() if not t.isdigit() and t not in clan_names]
+    # 직업 단어가 아닌 첫 조각, 전부 직업 단어면('군주/벌/82') 첫 조각
+    pick = next((t for t in tokens if t not in CLASS_WORDS), tokens[0] if tokens else "")
+    return pick + (BOTH_ROLES_MARK if warn else "") if pick else text
+
+
+def _chunk_joined(names, limit=FIELD_LIMIT) -> list:
+    """이름들을 ' · '로 이어 붙이되 필드 길이 제한에 맞춰 여러 덩어리로."""
     chunks, cur = [], ""
-    for line in lines:
-        line = line[:limit]
-        if cur and len(cur) + 1 + len(line) > limit:
+    for name in names:
+        name = name[:limit]
+        if cur and len(cur) + len(NAME_SEP) + len(name) > limit:
             chunks.append(cur)
-            cur = line
+            cur = name
         else:
-            cur = f"{cur}\n{line}" if cur else line
+            cur = f"{cur}{NAME_SEP}{name}" if cur else name
     if cur:
         chunks.append(cur)
     return chunks or ["없음"]
 
 
 def clan_fields(groups, unassigned) -> list:
-    """혈맹별 embed 필드 [(필드 이름, 값)] — 한 줄에 한 명, 혈맹 칸에서는 혈맹 표기 제거.
+    """혈맹별 embed 필드 [(필드 이름, 값)] — 닉네임만 ' · '로 이어 붙여 폰에서도 몇 줄로.
     길어서 나뉘면 이어지는 필드 이름은 빈칸(\u200b). 미지정은 있을 때만."""
-    out = []
-    cols = [((f"{emoji} {name}" if emoji else name), [strip_clan_tag(p, name) for p in members])
-            for name, emoji, members in groups]
+    clan_names = tuple(name for name, _, _ in groups)
+    cols = [((f"{emoji} {name}" if emoji else name), members) for name, emoji, members in groups]
     if unassigned:
         cols.append((UNASSIGNED_LABEL, list(unassigned)))
+    out = []
     for label, people in cols:
-        for i, chunk in enumerate(_chunk_lines(people)):
+        shorts = [short_name(p, clan_names) for p in people]
+        for i, chunk in enumerate(_chunk_joined(shorts)):
             out.append((f"{label} {len(people)}명" if i == 0 else "\u200b", chunk))
     return out

@@ -2965,7 +2965,7 @@ def make_attend_embed(boss_name, count, names, boss_time=None, expired=False, lo
             desc += f"\n👤 **획득자**: {loot_acquirers}"
     embed.description = desc
     for field_name, field_value in clan_field_rows:
-        embed.add_field(name=field_name, value=field_value, inline=True)
+        embed.add_field(name=field_name, value=field_value, inline=False)
     if deadline_ts:
         embed.add_field(name="⏳ 마감까지", value=f"<t:{deadline_ts}:R>", inline=False)
     elif expired:
