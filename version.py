@@ -7,7 +7,7 @@ from datetime import datetime
 # 버전 정보
 VERSION_MAJOR = 1
 VERSION_MINOR = 0
-VERSION_PATCH = 36
+VERSION_PATCH = 37
 VERSION_BUILD = 1
 
 # 버전 문자열
@@ -15,8 +15,8 @@ VERSION = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}"
 VERSION_FULL = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}.{VERSION_BUILD}"
 
 # 릴리즈 정보
-RELEASE_DATE = "2026-11-04"
-RELEASE_NAME = "Lite - 음악·TTS 소리 안 나는 문제 수정 (davey 0.1.x 고정)"
+RELEASE_DATE = "2026-11-05"
+RELEASE_NAME = "Lite - 혈맹별 참석 명단 개선(닉네임·5개 혈맹·예전 알림 변환), 음악봇 자동 재배정"
 RELEASE_CHANNEL = "stable"  # stable, beta, alpha
 
 # 제품 정보
