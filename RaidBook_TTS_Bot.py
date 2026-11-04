@@ -2,7 +2,7 @@
 """RaidBook TTS Bot — /tts 로 쓴 글을 음성채널에서 읽어 주는 별도 봇 (전용 토큰).
 
 /tts 내용:<텍스트> [목소리:남성|여성] → 쓴 사람이 있는 음성채널에 들어가 읽고, 채널에 글과 🔄 다시 듣기 버튼을 남긴다.
-/tts퇴장 /tts건너뛰기 /tts대기열.
+/tts나가기 /tts스킵 /tts대기열.
 설정: Config/tts_config.json — 보스봇·음악봇과 다른 전용 봇 토큰이 필요 (같은 봇이면 음성채널을 서로 뺏음).
 """
 import asyncio
@@ -319,7 +319,7 @@ async def cmd_tts(interaction: discord.Interaction, 내용: app_commands.Range[s
     log.info(f"[TTS] {name} | {rbt.VOICE_LABELS[voice]} | {내용[:60]} | 대기 {_state(interaction.guild.id).queue.qsize()}개")
 
 
-@bot.tree.command(name="tts퇴장", description="TTS 봇을 음성채널에서 내보내고 대기열을 비웁니다")
+@bot.tree.command(name="tts나가기", description="TTS 봇을 음성채널에서 내보내고 대기열을 비웁니다")
 @app_commands.guild_only()
 async def cmd_leave(interaction: discord.Interaction):
     st = _state(interaction.guild.id)
@@ -335,7 +335,7 @@ async def cmd_leave(interaction: discord.Interaction):
         await interaction.response.send_message("❌ 음성채널에 있지 않아요.", ephemeral=True)
 
 
-@bot.tree.command(name="tts건너뛰기", description="지금 읽고 있는 TTS를 건너뜁니다")
+@bot.tree.command(name="tts스킵", description="지금 읽고 있는 TTS를 건너뜁니다")
 @app_commands.guild_only()
 async def cmd_skip(interaction: discord.Interaction):
     vc = interaction.guild.voice_client

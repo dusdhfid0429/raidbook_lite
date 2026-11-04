@@ -14,7 +14,7 @@ VOICE_LABELS = {"1": "👨 남성", "2": "👩 여성"}
 VOICE_ICONS = {"1": "👨", "2": "👩"}
 _ICON_VOICE = {v: k for k, v in VOICE_ICONS.items()}
 
-TTS_COMMAND_NAMES = ("tts", "tts퇴장", "tts건너뛰기", "tts대기열")
+TTS_COMMAND_NAMES = ("tts", "tts나가기", "tts스킵", "tts대기열")
 
 _URL = re.compile(r"https?://\S+")
 _CUSTOM_EMOJI = re.compile(r"<a?:(\w+):\d+>")

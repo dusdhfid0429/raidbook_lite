@@ -16,6 +16,6 @@
   "max_length": 0,
   "_max_length_comment": "읽을 최대 글자 수. 0=제한 없음",
   "idle_disconnect_seconds": 0,
-  "_idle_disconnect_seconds_comment": "0이면 전체판처럼 /tts퇴장 전까지 음성채널에 머묾. 초를 넣으면 그 시간 동안 조용할 때 나감",
+  "_idle_disconnect_seconds_comment": "0이면 전체판처럼 /tts나가기 전까지 음성채널에 머묾. 초를 넣으면 그 시간 동안 조용할 때 나감",
   "ipc_port": 7704
 }
