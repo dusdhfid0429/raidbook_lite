@@ -90,6 +90,11 @@ log.addHandler(_console)
 _file = DailyFileHandler(LOG_DIR, "RaidBook_Music_Bot")
 _file.setFormatter(_formatter)
 log.addHandler(_file)
+# discord.py 자체 경고(음성 연결·E2EE(DAVE) 실패 등)도 같은 로그에 남긴다 — 소리 안 남 같은 문제 진단용
+_dlog = logging.getLogger("discord")
+_dlog.setLevel(logging.WARNING)
+_dlog.addHandler(_console)
+_dlog.addHandler(_file)
 
 
 def _int_set(values) -> set:
@@ -412,6 +417,36 @@ async def _shutdown(p: GuildPlayer):
     await _delete_np(p)
 
 
+def _audio_state(vc) -> dict:
+    """음성 전송 상태 (보낸 프레임 수, E2EE(DAVE) 준비 여부)."""
+    conn = getattr(vc, "_connection", None)
+    player = getattr(vc, "_player", None)
+    return {
+        "frames": getattr(player, "loops", 0),
+        "dave": getattr(conn, "dave_protocol_version", 0),
+        "encrypt": bool(getattr(conn, "can_encrypt", False)),
+    }
+
+
+async def _report_audio_state(p: GuildPlayer, vc, track):
+    """재생 5초 뒤 실제로 소리를 보내고 있는지 로그에 남긴다. 디스코드 E2EE 통화인데 암호화가 준비되지 않았으면
+    듣는 사람에게는 말하는 불만 들어오고 소리가 안 들리므로, E2EE 세션을 한 번 새로 맺는다."""
+    await asyncio.sleep(5)
+    if p.voice() is not vc or p.current is not track or not vc.is_playing():
+        return
+    st = _audio_state(vc)
+    log.info(f"[전송 상태] {p.client.user} @ {vc.channel} | 프레임 {st['frames']} | "
+             f"DAVE v{st['dave']} 암호화 {'준비됨' if st['encrypt'] else '안 됨'}")
+    if st["frames"] < 50:
+        log.warning(f"[전송 상태] {p.client.user}: 5초 동안 보낸 소리가 거의 없음 — yt-dlp/ffmpeg 입력이 막혔을 수 있음")
+    if st["dave"] and not st["encrypt"]:
+        log.warning(f"[전송 상태] {p.client.user}: E2EE(DAVE) 세션이 준비되지 않아 소리가 안 들릴 수 있음 — 세션 재설정")
+        try:
+            await vc._connection.reinit_dave_session()
+        except Exception as e:
+            log.warning(f"[전송 상태] DAVE 재설정 실패: {type(e).__name__}: {e}")
+
+
 async def play_next(p: GuildPlayer):
     """대기열 다음 곡 재생. 재생할 곡이 없으면 자동 퇴장 타이머를 건다."""
     async with p.lock:
@@ -457,6 +492,7 @@ async def play_next(p: GuildPlayer):
         vc.play(source, after=_after, bitrate=kbps, signal_type="music", fec=False, expected_packet_loss=0.01)
         log.info(f"[재생] {track.title} ({track.duration_text}) — {track.requester_name} | {kbps}kbps"
                  f" | {p.client.user} @ {vc.channel}({vc.channel.id})")
+        asyncio.create_task(_report_audio_state(p, vc, track))
     await _post_np(p)
 
 
