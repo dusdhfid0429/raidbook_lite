@@ -7,7 +7,7 @@ from datetime import datetime
 # 버전 정보
 VERSION_MAJOR = 1
 VERSION_MINOR = 0
-VERSION_PATCH = 30
+VERSION_PATCH = 31
 VERSION_BUILD = 1
 
 # 버전 문자열
@@ -15,8 +15,8 @@ VERSION = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}"
 VERSION_FULL = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}.{VERSION_BUILD}"
 
 # 릴리즈 정보
-RELEASE_DATE = "2026-11-03"
-RELEASE_NAME = "Lite - 인원체크 혈맹별(정도/슈퍼맨) 구분 표시"
+RELEASE_DATE = "2026-11-04"
+RELEASE_NAME = "Lite - TTS 전용 채널 지정, /tts 명령어 정리(나가기·스킵)"
 RELEASE_CHANNEL = "stable"  # stable, beta, alpha
 
 # 제품 정보
