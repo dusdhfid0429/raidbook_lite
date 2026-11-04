@@ -455,7 +455,8 @@ async def play_next(p: GuildPlayer):
         # 음악용 Opus 설정: 비트레이트를 채널에 맞춰 올리고, 손실 보정(FEC)에 쓰던 비트를 음질에 쓴다
         kbps = rbm.voice_bitrate_kbps(getattr(vc.channel, "bitrate", 0), BITRATE_KBPS)
         vc.play(source, after=_after, bitrate=kbps, signal_type="music", fec=False, expected_packet_loss=0.01)
-        log.info(f"[재생] {track.title} ({track.duration_text}) — {track.requester_name} | {kbps}kbps")
+        log.info(f"[재생] {track.title} ({track.duration_text}) — {track.requester_name} | {kbps}kbps"
+                 f" | {p.client.user} @ {vc.channel}({vc.channel.id})")
     await _post_np(p)
 
 
@@ -626,6 +627,19 @@ class MusicControlView(discord.ui.View):
         await do_volume_step(interaction, VOLUME_STEP)
 
 
+def _voice_warning(vc) -> str:
+    """봇이 들어갔지만 소리를 낼 수 없는 상태(말하기 권한 없음·서버 음소거)를 안내 문구로 돌려준다."""
+    try:
+        me = vc.channel.guild.me
+        if not vc.channel.permissions_for(me).speak:
+            return "말하기 권한이 없어 소리가 나지 않아요. 채널 권한에서 이 봇에 '말하기'를 허용해 주세요."
+        if me.voice and (me.voice.mute or me.voice.suppress):
+            return "서버 음소거 상태라 소리가 나지 않아요. 봇의 서버 음소거를 풀어 주세요."
+    except Exception:
+        pass
+    return ""
+
+
 def _all_busy_text(guild_id: int) -> str:
     total = len(_clients())
     joined = sum(1 for c in _clients() if c.get_guild(guild_id) is not None)
@@ -693,10 +707,14 @@ async def cmd_play(interaction: discord.Interaction, 링크: str):
             await interaction.followup.send(
                 f"⚠ 음성채널에 들어가지 못했습니다. 봇에 연결·말하기 권한이 있는지 확인해 주세요.\n`{e}`")
             return
+        warn = _voice_warning(vc)
         busy = vc.is_playing() or vc.is_paused() or p.current is not None
         if not busy or not p.text_channel_id:   # 재생 중이면 안내 메시지는 처음 /재생한 채널에 계속
             p.text_channel_id = interaction.channel_id
         added = p.queue.add(tracks)
+    if warn:
+        log.warning(f"[음성 권한] {p.client.user} @ {vc.channel}: {warn}")
+        await interaction.followup.send(f"⚠ **{p.client.user.display_name}** 봇이 {vc.channel.mention}에서 {warn}")
     if added == 0:
         await interaction.followup.send(f"⚠ 대기열이 가득 찼어요 (최대 {MAX_QUEUE}곡). 곡이 끝나거나 `/삭제`로 빼면 다시 추가할 수 있어요.")
         return
