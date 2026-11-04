@@ -313,6 +313,21 @@ def test_manual_close_countdown():
     assert "boss_board_close" in ids(ba.BoardView(a))                   # 재시작 복구 등록용엔 항상 있음
 
 
+def test_usage_guides():
+    def usage(e):
+        return next((f.value for f in e.fields if f.name == "📖 사용법"), "")
+    assert "아이템 고르기" in usage(ba.build_pending_embed([]))           # 대기 목록 사용법
+    lots, _ = ba.parse_board_lots("집행검", D)
+    board = {"lots": lots, "status": "active", "current": None, "source_message_id": "1"}
+    assert "경매시작" in usage(ba.build_board_embed(board, now=1990))       # 시작 대기
+    ba.board_start_next(board, 2000, manual=True)
+    u = usage(ba.build_board_embed(board, now=2001))
+    assert "입찰" in u and "경매 마감" in u and "참석자만" in u             # 진행 중 (진행자 마감)
+    lot = ba.board_close_current(board)
+    ba.board_after_close(board)
+    assert "유찰 재경매" in usage(ba.build_board_embed(board, now=2010)) and lot   # 끝남 (유찰)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

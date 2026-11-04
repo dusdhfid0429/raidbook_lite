@@ -1240,6 +1240,34 @@ def pending_items(entries, *, selectable=False):
     return pairs
 
 
+PENDING_USAGE = ("· 🔨 **아이템 고르기** (관리자) — 시작가·호가·카운트를 넣으면 경매가 올라가요\n"
+                 "· 🙈 **목록에서 빼기** (관리자) — 경매하지 않을 아이템을 숨겨요\n"
+                 "· 🔄 **새로고침** — 목록을 다시 불러와요")
+
+
+def board_usage_text(board, state, lot=None):
+    """경매 진행판 상태별 간단 사용법 (금액·이름 없음)."""
+    if state == "waiting":
+        return ("· ▶️ **경매시작** (관리자) — 다음 아이템의 입찰을 열어요\n"
+                "· ⏹️ **종료** (관리자) — 남은 아이템을 모두 취소하고 끝내요")
+    if state == "active":
+        who = "해당 보스탐 참석자만" if board.get("source_message_id") else "누구나"
+        lines = [f"· 🙋 **입찰** — 누를 때마다 호가만큼 올라가요 ({who})",
+                 f"· 입찰 직후 {BID_SETTLE_SEC}초는 확인 시간이라 다른 사람은 잠시 못 눌러요"]
+        if lot and lot.get("manual"):
+            lines += ["· ⏱️ **경매 마감** (진행자) — 마감 카운트 시작, 카운트 중 입찰이 들어오면 취소되고 계속 진행돼요",
+                      "· 카운트가 끝나면 최고 입찰자 낙찰 · 입찰 없이 마감하면 유찰"]
+        else:
+            lines.append("· 카운트 동안 새 입찰이 없으면 최고 입찰자에게 낙찰돼요")
+        return "\n".join(lines)
+    lines = []
+    if board_unsold_lots(board):
+        lines.append("· 🔁 **유찰 재경매** (관리자) — 유찰·취소된 아이템만 새 경매로 다시 올려요")
+    if board_can_settle(board):
+        lines.append("· 💰 **정산** (관리자) — 낙찰금을 혈비·참석자 몫으로 나눠 계산해요")
+    return "\n".join(lines)
+
+
 def build_pending_embed(entries, *, days=None, alert_link=None):
     """📌 경매 대기 목록 embed — 아이템별 상태 (이름·상태만, 금액 없음). alert_link: mid → 보스 알림 링크."""
     embed = discord.Embed(title="📌 경매 대기 목록", color=0x5865f2)
@@ -1262,6 +1290,7 @@ def build_pending_embed(entries, *, days=None, alert_link=None):
     if shown < len(pairs):
         lines.append(f"…외 {len(pairs) - shown}건")
     embed.description = "\n".join(lines) or "경매를 기다리는 아이템이 없어요."
+    embed.add_field(name="📖 사용법", value=PENDING_USAGE, inline=False)
     pickable = sum(1 for _, o in pairs if not o.get("running"))
     tail = " (선택 목록은 25건까지)" if pickable > 25 else ""
     embed.set_footer(text=f"{len(pairs)}건 · 낙찰되면 목록에서 빠져요 · 아래에서 고르면 경매 생성 (관리자){tail}")
@@ -1574,6 +1603,9 @@ def build_board_embed(board, currency="", now=None):
             embed.add_field(name=f"📜 최근 입찰 (총 {lot.get('bid_count', 0)}회)", value=hist, inline=False)
         if board.get("source_message_id"):
             embed.add_field(name="🔐 입찰 자격", value="해당 보스탐 참석자만 입찰할 수 있어요.", inline=False)
+    usage = board_usage_text(board, state, lot)
+    if usage:
+        embed.add_field(name="📖 사용법", value=usage, inline=False)
     done = sum(1 for x in lots if x.get("status") in ("closed", "cancelled"))
     tail = {"active": "🙋 입찰을 누르면 호가만큼 올라갑니다", "waiting": "▶️ 관리자 시작 대기"}.get(state, "모든 경매가 끝났어요")
     embed.set_footer(text=f"{done}/{len(lots)} 완료 · {tail} · 등록자 {board.get('creator_name', '-')}")
