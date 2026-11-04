@@ -53,6 +53,29 @@ def test_lookup_error_is_unassigned():
     assert unassigned == ["a"] and all(not g[2] for g in groups)
 
 
+def test_strip_tag_and_fields():
+    assert rbc.strip_clan_tag("[정도]투신/기사/90", "정도") == "투신/기사/90"
+    assert rbc.strip_clan_tag("@[슈퍼맨] 군주/벌/82", "슈퍼맨") == "군주/벌/82"
+    assert rbc.strip_clan_tag("정도/기사/정도완력", "정도") == "기사/정도완력"
+    assert rbc.strip_clan_tag("[정도]", "정도") == "[정도]"
+    assert rbc.strip_clan_tag("슈퍼맨/미르/87", "정도") == "슈퍼맨/미르/87"
+    clans = rbc.parse_clan_roles(None)
+    groups = [("정도", "⚔️", ["[정도]a", "b ⚠️"]), ("슈퍼맨", "🦸", [])]
+    assert rbc.clan_fields(groups, ["[슈퍼맨]c"]) == [
+        ("⚔️ 정도 2명", "a\nb ⚠️"), ("🦸 슈퍼맨 0명", "없음"), ("❔ 미지정 1명", "[슈퍼맨]c")]
+    assert rbc.clan_fields(rbc.group_by_clan([], clans, lambda n: set())[0], []) == [
+        ("⚔️ 정도 0명", "없음"), ("🦸 슈퍼맨 0명", "없음")]
+
+
+def test_fields_split_long():
+    people = [f"사람{i:02d}/" + "x" * 40 for i in range(60)]
+    fields = rbc.clan_fields([("정도", "⚔️", people)], [])
+    assert len(fields) > 1 and fields[0][0] == "⚔️ 정도 60명"
+    assert all(n == "\u200b" for n, _ in fields[1:])
+    assert all(len(v) <= 1024 for _, v in fields)
+    assert sum(len(v.split("\n")) for _, v in fields) == 60
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

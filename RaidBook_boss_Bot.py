@@ -2925,6 +2925,7 @@ def make_attend_embed(boss_name, count, names, boss_time=None, expired=False, lo
     if not PARTY_ENABLED:
         confirmed_names = None
         countdown_text = ""   # 파티 확정 카운트다운
+    clan_field_rows = []
     if confirmed_names is not None:
         # 파티 확정 후: 확정/미확정 분리 표시
         confirmed_count = len(confirmed_names.split(", ")) if confirmed_names and confirmed_names != "없음" else 0
@@ -2944,7 +2945,9 @@ def make_attend_embed(boss_name, count, names, boss_time=None, expired=False, lo
             log.info(f"[혈맹 구분 실패] {type(e).__name__}: {e}")
             clan = None
         if clan:
-            attendee_block = rb_clans.format_clan_block(prefix, count, *clan)
+            # 혈맹별 명단은 아래 필드(칸)로 — 여기엔 총원만
+            attendee_block = f"{prefix}: 총 {count}명"
+            clan_field_rows = rb_clans.clan_fields(*clan)
         else:
             attendee_block = f"{prefix}: {count}명 | {names}"
 
@@ -2961,6 +2964,8 @@ def make_attend_embed(boss_name, count, names, boss_time=None, expired=False, lo
         if loot_acquirers and not LOOT_AUCTION_BUTTON:
             desc += f"\n👤 **획득자**: {loot_acquirers}"
     embed.description = desc
+    for field_name, field_value in clan_field_rows:
+        embed.add_field(name=field_name, value=field_value, inline=True)
     if deadline_ts:
         embed.add_field(name="⏳ 마감까지", value=f"<t:{deadline_ts}:R>", inline=False)
     elif expired:

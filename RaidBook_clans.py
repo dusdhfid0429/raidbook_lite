@@ -74,3 +74,47 @@ def format_clan_counts(groups, unassigned) -> str:
     if unassigned:
         parts.append(f"미지정 {len(unassigned)}")
     return " · ".join(parts)
+
+
+FIELD_LIMIT = 1024   # 디스코드 embed 필드 값 최대 길이
+
+
+def strip_clan_tag(person, clan_name) -> str:
+    """혈맹 칸 안에서는 이름 앞 혈맹 표기를 뺀다: '[정도]투신/기사/90' · '@[정도] 투신' · '정도/기사/x' → 나머지.
+    빼고 나면 빈 이름이 되면 원래 이름 그대로."""
+    text = str(person)
+    body = text.lstrip("@").lstrip()
+    for tag in (f"[{clan_name}]", f"{clan_name}/"):
+        if body.startswith(tag):
+            rest = body[len(tag):].strip()
+            return rest or text
+    return text
+
+
+def _chunk_lines(lines, limit=FIELD_LIMIT) -> list:
+    """한 줄에 한 명 목록을 필드 길이 제한에 맞춰 여러 덩어리로."""
+    chunks, cur = [], ""
+    for line in lines:
+        line = line[:limit]
+        if cur and len(cur) + 1 + len(line) > limit:
+            chunks.append(cur)
+            cur = line
+        else:
+            cur = f"{cur}\n{line}" if cur else line
+    if cur:
+        chunks.append(cur)
+    return chunks or ["없음"]
+
+
+def clan_fields(groups, unassigned) -> list:
+    """혈맹별 embed 필드 [(필드 이름, 값)] — 한 줄에 한 명, 혈맹 칸에서는 혈맹 표기 제거.
+    길어서 나뉘면 이어지는 필드 이름은 빈칸(\u200b). 미지정은 있을 때만."""
+    out = []
+    cols = [((f"{emoji} {name}" if emoji else name), [strip_clan_tag(p, name) for p in members])
+            for name, emoji, members in groups]
+    if unassigned:
+        cols.append((UNASSIGNED_LABEL, list(unassigned)))
+    for label, people in cols:
+        for i, chunk in enumerate(_chunk_lines(people)):
+            out.append((f"{label} {len(people)}명" if i == 0 else "\u200b", chunk))
+    return out
