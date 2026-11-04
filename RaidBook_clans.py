@@ -7,7 +7,20 @@
 DEFAULT_CLAN_ROLES = [
     {"role": "정도", "emoji": "⚔️"},
     {"role": "슈퍼맨", "emoji": "🦸"},
+    {"role": "썰자", "emoji": "🔪"},
+    {"role": "방다빼", "emoji": "🏃"},
+    {"role": "복덕방", "emoji": "🏠"},
 ]
+
+
+def add_missing_roles(raw, roles=DEFAULT_CLAN_ROLES) -> tuple:
+    """예전 설정의 clan_roles 목록 뒤에 없는 기본 혈맹을 붙인다 (운영진이 바꾼 이모지·순서는 유지).
+    반환: (새 목록, 추가한 역할 이름들). raw가 목록이 아니면 그대로."""
+    if not isinstance(raw, list):
+        return raw, []
+    have = {(item.get("role") or item.get("name")) if isinstance(item, dict) else item for item in raw}
+    added = [dict(r) for r in roles if r["role"] not in have]
+    return raw + added, [r["role"] for r in added]
 UNASSIGNED_LABEL = "❔ 미지정"
 BOTH_ROLES_MARK = " ⚠️"
 

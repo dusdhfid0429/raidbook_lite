@@ -314,6 +314,18 @@ LOOT_AUCTION_BUTTON = bool(config.get("loot_auction_button", False))
 PARTY_ENABLED = bool(config.get("party_enabled", False))
 # 혈맹 구분 — 참석자를 이 역할별로 묶어 표시 (키 없으면 정도·슈퍼맨, 빈 목록이면 끔).
 # 서버에 이 역할이 하나도 없으면 예전처럼 한 줄로 표시
+# 썰자·방다빼·복덕방 혈맹 추가 (2026-11-04) — 예전 설치판 clan_roles 목록에 한 번만 붙인다
+if not config.get("_clan_roles_v2_applied"):
+    config["clan_roles"], _added_clans = rb_clans.add_missing_roles(config.get("clan_roles"))
+    if config["clan_roles"] is None:
+        config.pop("clan_roles")
+    config["_clan_roles_v2_applied"] = True
+    try:
+        write_json_atomic(CONFIG_PATH, config, log)
+        if _added_clans:
+            log.info(f"[설정] 혈맹 구분 역할 추가: {', '.join(_added_clans)}")
+    except Exception as e:
+        log.info(f"[설정] 혈맹 역할 추가 저장 실패 (이번 실행만 적용): {e}")
 CLAN_ROLES = rb_clans.parse_clan_roles(config.get("clan_roles"))
 # 구버전 방식: 전리품 공지 메시지의 🔨 경매시작 버튼 → 세팅 입력 → ▶️ 시작 (기본 꺼짐)
 LOOT_AUCTION_LEGACY = bool(config.get("loot_auction_legacy", False))

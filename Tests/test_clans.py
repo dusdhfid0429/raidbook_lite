@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import RaidBook_clans as rbc  # noqa: E402
 
+TWO = [("정도", "⚔️"), ("슈퍼맨", "🦸")]
 ROLES = {
     "홍길동": {"정도"}, "김철수": {"정도", "운영진"}, "최강": {"슈퍼맨"},
     "양다리": {"정도", "슈퍼맨"}, "손님": set(),
@@ -14,7 +15,7 @@ ROLES = {
 
 
 def test_parse_roles():
-    assert rbc.parse_clan_roles(None) == [("정도", "⚔️"), ("슈퍼맨", "🦸")]
+    assert rbc.parse_clan_roles(None) == [("정도", "⚔️"), ("슈퍼맨", "🦸"), ("썰자", "🔪"), ("방다빼", "🏃"), ("복덕방", "🏠")]
     assert rbc.parse_clan_roles([]) == []
     assert rbc.parse_clan_roles(["A", {"role": "B", "emoji": "🅱"}, "A", ""]) == [("A", ""), ("B", "🅱")]
 
@@ -26,7 +27,7 @@ def test_split_names():
 
 
 def test_group_and_format():
-    clans = rbc.parse_clan_roles(None)
+    clans = TWO
     names = ["홍길동", "최강", "김철수", "양다리", "손님", "모름"]
     groups, unassigned = rbc.group_by_clan(names, clans, lambda n: ROLES.get(n, set()))
     assert groups == [("정도", "⚔️", ["홍길동", "김철수", "양다리 ⚠️"]), ("슈퍼맨", "🦸", ["최강"])], groups
@@ -40,7 +41,7 @@ def test_group_and_format():
 
 
 def test_empty_clan_and_no_unassigned():
-    clans = rbc.parse_clan_roles(None)
+    clans = TWO
     groups, unassigned = rbc.group_by_clan(["최강"], clans, lambda n: ROLES.get(n, set()))
     block = rbc.format_clan_block("✅ 최종 참석", 1, groups, unassigned)
     assert block == "✅ 최종 참석: 총 1명\n⚔️ 정도 (0명) | 없음\n🦸 슈퍼맨 (1명) | 최강", block
@@ -79,6 +80,16 @@ def test_fields_split_long():
     assert all(n == "\u200b" for n, _ in fields[1:])
     assert all(len(v) <= 1024 for _, v in fields)
     assert sum(len(v.split(" · ")) for _, v in fields) == 60
+
+
+def test_add_missing_roles():
+    old = [{"role": "정도", "emoji": "🗡"}, "슈퍼맨"]
+    new, added = rbc.add_missing_roles(old)
+    assert added == ["썰자", "방다빼", "복덕방"]
+    assert new[:2] == old and [r["role"] for r in new[2:]] == added
+    assert rbc.add_missing_roles(new) == (new, [])
+    assert rbc.add_missing_roles(None) == (None, [])
+    assert rbc.add_missing_roles([]) [1] == ["정도", "슈퍼맨", "썰자", "방다빼", "복덕방"]
 
 
 if __name__ == "__main__":
