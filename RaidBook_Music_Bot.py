@@ -229,11 +229,24 @@ def _player_in_channel(guild_id: int, channel_id: int):
     return None
 
 
-def _pick_player(guild_id: int, channel_id: int):
-    """그 음성채널에 이미 있는 봇 → 음성에 없는 봇 → 놀고 있는 봇 순으로 고른다. 없으면 None."""
+def _missing_voice_perms(client: discord.Client, channel_id: int) -> list:
+    """그 봇이 이 음성채널에서 못 하는 것 (보기·연결·말하기). 빈 목록이면 OK."""
+    ch = client.get_channel(channel_id)
+    if ch is None:
+        return ["채널 보기"]
+    perms = ch.permissions_for(ch.guild.me)
+    return [name for name, ok in (("채널 보기", perms.view_channel), ("연결", perms.connect),
+                                  ("말하기", perms.speak)) if not ok]
+
+
+def _pick_player(guild_id: int, channel_id: int, exclude=()):
+    """그 음성채널에 이미 있는 봇 → 음성에 없는 봇 → 놀고 있는 봇 순으로 고른다. 없으면 None.
+    그 채널 권한(보기·연결·말하기)이 없는 봇과 exclude(이번에 연결 실패한 봇)는 건너뛴다."""
     cands = []
     for c in _clients():
-        if c.get_guild(guild_id) is None:   # 이 서버에 초대되지 않은 봇
+        if c.get_guild(guild_id) is None or c in exclude:   # 이 서버에 초대되지 않은 봇
+            continue
+        if _missing_voice_perms(c, channel_id):
             continue
         p = get_player(c, guild_id)
         cands.append((p, p.voice().channel.id if p.connected() else None, p.busy()))
@@ -670,6 +683,28 @@ class MusicControlView(discord.ui.View):
         await do_volume_step(interaction, VOLUME_STEP)
 
 
+async def _connect(p: GuildPlayer, channel_id: int):
+    """그 봇으로 음성채널에 들어간다 (연결은 그 봇의 채널 객체로 해야 그 봇이 들어간다)."""
+    channel = p.client.get_channel(channel_id)
+    vc = p.voice()
+    if vc is not None and vc.is_connected():
+        if vc.channel.id != channel_id:
+            await vc.move_to(channel)
+        return vc
+    if vc is not None:   # 이전 연결 시도가 덜 끝난 채 남아 있으면 정리
+        await _drop_voice(p)
+    return await channel.connect(self_deaf=True, timeout=15, reconnect=False)
+
+
+async def _drop_voice(p: GuildPlayer):
+    vc = p.voice()
+    if vc is not None:
+        try:
+            await vc.disconnect(force=True)
+        except Exception:
+            pass
+
+
 def _voice_warning(vc) -> str:
     """봇이 들어갔지만 소리를 낼 수 없는 상태(말하기 권한 없음·서버 음소거)를 안내 문구로 돌려준다."""
     try:
@@ -683,12 +718,20 @@ def _voice_warning(vc) -> str:
     return ""
 
 
-def _all_busy_text(guild_id: int) -> str:
+def _all_busy_text(guild_id: int, channel_id: int = 0) -> str:
     total = len(_clients())
-    joined = sum(1 for c in _clients() if c.get_guild(guild_id) is not None)
-    text = f"🎵 음악봇 {joined}개가 모두 다른 채널에서 재생 중이에요. 하나가 끝나면 다시 시도해 주세요."
-    if joined < total:
-        text += f"\n(이 서버에 초대되지 않은 음악봇이 {total - joined}개 있어요)"
+    joined = [c for c in _clients() if c.get_guild(guild_id) is not None]
+    no_perm = []
+    if channel_id:
+        for c in joined:
+            miss = _missing_voice_perms(c, channel_id)
+            if miss:
+                no_perm.append(f"{c.user.display_name}({'·'.join(miss)})")
+    text = "🎵 이 채널에 들어갈 수 있는 음악봇이 모두 다른 채널에서 재생 중이에요. 하나가 끝나면 다시 시도해 주세요."
+    if no_perm:
+        text += f"\n이 채널 권한이 없는 봇: {', '.join(no_perm)} — 채널 권한에서 허용해 주세요."
+    if len(joined) < total:
+        text += f"\n(이 서버에 초대되지 않은 음악봇이 {total - len(joined)}개 있어요)"
     return text
 
 
@@ -716,7 +759,7 @@ async def cmd_play(interaction: discord.Interaction, 링크: str):
     gid = interaction.guild.id
     target = member.voice.channel
     if _pick_player(gid, target.id) is None:
-        await interaction.response.send_message(_all_busy_text(gid), ephemeral=True)
+        await interaction.response.send_message(_all_busy_text(gid, target.id), ephemeral=True)
         return
 
     await interaction.response.defer(thinking=True)
@@ -733,23 +776,24 @@ async def cmd_play(interaction: discord.Interaction, 링크: str):
     # 봇 고르기 → 음성 연결 → 대기열 추가를 한 번에 (그 사이 다른 /재생이 같은 봇을 가져가지 않게)
     lock = _assign_locks.setdefault(gid, asyncio.Lock())
     async with lock:
-        p = _pick_player(gid, target.id)
-        if p is None:
-            await interaction.followup.send(_all_busy_text(gid))
-            return
-        try:
-            vc = p.voice()
-            if vc is None or not vc.is_connected():
-                # 연결은 그 봇의 서버/채널 객체로 해야 그 봇이 들어간다
-                channel = p.client.get_channel(target.id)
-                vc = await channel.connect(self_deaf=True, timeout=20)
-            elif vc.channel.id != target.id:
-                await vc.move_to(p.client.get_channel(target.id))
-        except Exception as e:
-            log.warning(f"[음성 연결 실패] {target} ({p.client.user}): {type(e).__name__}: {e}")
-            await interaction.followup.send(
-                f"⚠ 음성채널에 들어가지 못했습니다. 봇에 연결·말하기 권한이 있는지 확인해 주세요.\n`{e}`")
-            return
+        failed = []
+        while True:
+            p = _pick_player(gid, target.id, exclude=failed)
+            if p is None:
+                if failed:
+                    names = ", ".join(c.user.display_name for c in failed)
+                    await interaction.followup.send(
+                        f"⚠ 음성채널에 들어가지 못했습니다 ({names}). 그 봇에 이 채널 연결·말하기 권한이 있는지 확인해 주세요.")
+                else:
+                    await interaction.followup.send(_all_busy_text(gid, target.id))
+                return
+            try:
+                vc = await _connect(p, target.id)
+                break
+            except Exception as e:
+                log.warning(f"[음성 연결 실패] {target} ({p.client.user}): {type(e).__name__}: {e} — 다른 봇으로 다시 시도")
+                failed.append(p.client)
+                await _drop_voice(p)
         warn = _voice_warning(vc)
         busy = vc.is_playing() or vc.is_paused() or p.current is not None
         if not busy or not p.text_channel_id:   # 재생 중이면 안내 메시지는 처음 /재생한 채널에 계속
