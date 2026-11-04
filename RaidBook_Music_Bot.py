@@ -52,6 +52,13 @@ if "--selftest" in sys.argv:
         except Exception as _e:
             _bad.append(f"{_mod}: {type(_e).__name__}: {_e}")
     try:
+        import davey as _davey
+        # davey 0.2+는 키 전환 API가 바뀌어 discord.py 2.7.1과 쓰면 소리가 나가지 않는다 (requirements.txt 참고)
+        if hasattr(_davey.DaveSession, "prepare_transition") and discord.__version__ <= "2.7.1":
+            _bad.append(f"davey: discord.py {discord.__version__}와 호환되지 않는 버전 (0.1.x 필요)")
+    except Exception:
+        pass
+    try:
         discord.opus._load_default()
         if not discord.opus.is_loaded():
             _bad.append("opus: 로드 안 됨")

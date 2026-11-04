@@ -1,4 +1,7 @@
 discord.py[voice]>=2.7.1
+# davey 0.2.0(2026-11-02)부터 키 전환(prepare/execute_transition)을 직접 호출해야 하는데 discord.py 2.7.1은 이를 안 함
+# → 음성 E2EE 키가 적용되지 않아 "말하는 불은 들어오는데 소리가 안 들림". discord.py가 지원할 때까지 0.1.x 고정
+davey>=0.1.7,<0.2
 edge-tts>=6.1.0
 imageio-ffmpeg>=0.5.1
 openpyxl>=3.1.0
