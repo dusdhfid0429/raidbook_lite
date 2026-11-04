@@ -304,6 +304,22 @@ async def self_update(cmd: list) -> str:
 # 같은 토큰 = 같은 Discord 애플리케이션이라 서버의 슬래시 명령 목록도 하나다.
 # tree.sync()는 목록 전체를 덮어쓰므로, 음악 봇은 자기 명령만 하나씩 등록(upsert)하고
 # 보스봇은 동기화할 때 아래 이름의 기존 명령을 지우지 않고 되살린다.
+
+def pick_bot(candidates, channel_id):
+    """동시 재생 봇 배정. candidates: [(봇, 들어가 있는 음성채널 ID 또는 None, 재생/대기곡 있음)] (우선순위 순).
+    1) 그 채널에 이미 있는 봇 2) 음성에 없는 봇 3) 다른 채널에 있지만 놀고 있는 봇. 모두 바쁘면 None."""
+    for bot, ch, _busy in candidates:
+        if ch == channel_id:
+            return bot
+    for bot, ch, _busy in candidates:
+        if ch is None:
+            return bot
+    for bot, ch, busy in candidates:
+        if not busy:
+            return bot
+    return None
+
+
 MUSIC_COMMAND_NAMES = frozenset({"재생", "건너뛰기", "일시정지", "정지", "대기열", "현재곡", "삭제", "볼륨"})
 
 _PAYLOAD_KEYS = ("type", "name", "description", "name_localizations", "description_localizations",

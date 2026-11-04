@@ -2132,7 +2132,8 @@ class WatchdogApp(tk.Tk):
 
     # ── 초기 설정 마법사 ─────────────────────────────────────────────────────
     def _show_setup_wizard(self, on_complete, edit_mode=False):
-        """config 미설정 시 표시되는 3단계(Watchdog·Boss Bot·TTS Bot) 초기 설정 마법사. TTS 토큰은 선택.
+        """config 미설정 시 표시되는 4단계(Watchdog·Boss Bot·TTS Bot·Music Bot) 초기 설정 마법사.
+        TTS 토큰과 추가 음악봇 토큰은 선택.
 
         edit_mode=True 이면 실행 중 설정 수정 용도로 열린다:
         닫기(X/Esc)로 취소할 수 있고, 저장 시 on_complete가 봇을 재시작한다.
@@ -2140,8 +2141,9 @@ class WatchdogApp(tk.Tk):
 
         _BOSS_PATH   = get_config_path("boss_config.json")
         _TTS_PATH    = get_config_path("tts_config.json")
+        _MUSIC_PATH  = get_config_path("music_config.json")
 
-        for _path in (CONFIG_PATH, _BOSS_PATH, _TTS_PATH):
+        for _path in (CONFIG_PATH, _BOSS_PATH, _TTS_PATH, _MUSIC_PATH):
             ensure_config_from_template(_path)
 
         def _load(path):
@@ -2154,6 +2156,7 @@ class WatchdogApp(tk.Tk):
         wdog_c   = _load(CONFIG_PATH)
         boss_c   = _load(_BOSS_PATH)
         tts_c    = _load(_TTS_PATH)
+        music_c  = _load(_MUSIC_PATH)
 
         # ── 창 ────────────────────────────────────────────────────────────────
         win = tk.Toplevel(self)
@@ -2177,7 +2180,7 @@ class WatchdogApp(tk.Tk):
                     self._on_close()
             win.protocol("WM_DELETE_WINDOW", _confirm_quit)
 
-        W, H = 620, 560
+        W, H = 620, 600
         win.update_idletasks()
         sx, sy = win.winfo_screenwidth(), win.winfo_screenheight()
         win.geometry(f"{W}x{H}+{(sx - W) // 2}+{(sy - H) // 2}")
@@ -2204,6 +2207,7 @@ class WatchdogApp(tk.Tk):
             ("Watchdog",   "\U0001f6e1"),
             ("Boss Bot",   "⚔"),
             ("TTS Bot",    "\U0001f50a"),
+            ("Music Bot",  "\U0001f3b5"),
         ]
         prog_frame = tk.Frame(win, bg=_C["panel"])
         prog_frame.pack(fill="x")
@@ -2364,6 +2368,31 @@ class WatchdogApp(tk.Tk):
         _field(s2, "봇 토큰",       v["tts_token"],  required=False, hide=True,
                tip="TTS 전용 Discord 봇 토큰 (선택)")
 
+        # Step 3 — 추가 음악봇 (선택, 동시 재생 채널 수 = 1 + 토큰 수)
+        s3 = _mk()
+        _step_header(s3, "\U0001f3b5", "추가 음악봇 설정 (선택)",
+                     "봇 하나는 음성채널 하나에서만 재생할 수 있습니다. 토큰을 넣은 수만큼 음악봇이 늘어나\n"
+                     "(1 + 토큰 수)개 채널에서 따로 재생합니다. 기본 음악봇은 Boss Bot 토큰을 같이 씁니다.\n"
+                     "봇마다 디스코드 앱을 따로 만들고 서버에 초대해야 합니다. 다른 봇과 같은 토큰은 안 됩니다.")
+        music_rows = tk.Frame(s3, bg=_C["bg"])
+        music_rows.pack(fill="x")
+        music_vars: list = []
+
+        def _add_music_row(val=""):
+            var = tk.StringVar(value=val)
+            music_vars.append(var)
+            _field(music_rows, f"추가 음악봇 {len(music_vars)} 토큰", var, required=False, hide=True,
+                   tip="음악 전용으로 새로 만든 Discord 봇 토큰 (선택)")
+
+        _existing_music = [str(t).strip() for t in (music_c.get("extra_tokens") or []) if str(t).strip()]
+        for _t in _existing_music:
+            _add_music_row(_t)
+        while len(music_vars) < 3:
+            _add_music_row()
+        tk.Button(s3, text="➕ 음악봇 칸 추가", command=_add_music_row,
+                  font=self._font_small, bg=_C["panel"], fg=_C["text"],
+                  relief="flat", padx=10, pady=3, cursor="hand2").pack(anchor="w", pady=(6, 0))
+
         # ── 스텝 전환 로직 ────────────────────────────────────────────────────
         cur = [0]
 
@@ -2426,6 +2455,17 @@ class WatchdogApp(tk.Tk):
                     _tk("tts_token",  "TTS Bot 토큰")
                     if tts in (v["boss_token"].get().strip(), v["wdog_token"].get().strip()):
                         errors.append("[TTS Bot 토큰] 다른 봇과 같은 토큰입니다. TTS 전용 봇의 토큰을 넣어 주세요.")
+            elif idx == 3:
+                used = {v[k].get().strip() for k in ("boss_token", "wdog_token", "tts_token")} - {""}
+                for i, var in enumerate(music_vars, 1):
+                    t = var.get().strip()
+                    if not t:
+                        continue
+                    if len(t) < 40:
+                        errors.append(f"[추가 음악봇 {i}] 토큰 형식이 올바르지 않습니다.")
+                    elif t in used:
+                        errors.append(f"[추가 음악봇 {i}] 다른 봇과 같은 토큰입니다. 음악 전용 봇의 토큰을 넣어 주세요.")
+                    used.add(t)
             return errors
 
         def _save_all():
@@ -2465,6 +2505,14 @@ class WatchdogApp(tk.Tk):
                     tts["token"]           = _str("tts_token")
                     with open(_TTS_PATH, "w", encoding="utf-8") as f:
                         json.dump(tts, f, ensure_ascii=False, indent=4)
+
+                # music_config.json — 추가 음악봇 토큰 (넣은 수만큼 동시 재생 채널이 늘어남)
+                extra = [var.get().strip() for var in music_vars if var.get().strip()]
+                music = _load(_MUSIC_PATH)
+                if [str(t).strip() for t in (music.get("extra_tokens") or [])] != extra:
+                    music["extra_tokens"] = extra
+                    with open(_MUSIC_PATH, "w", encoding="utf-8") as f:
+                        json.dump(music, f, ensure_ascii=False, indent=2)
 
                 # 전역 변수 즉시 반영 (run_bot/_wdog_bot 등은 공유 코어 모듈에 있으므로 그쪽도 갱신)
                 WATCHDOG_TOKEN   = _str("wdog_token")

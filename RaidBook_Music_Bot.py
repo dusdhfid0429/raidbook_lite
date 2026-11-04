@@ -5,6 +5,11 @@
 /건너뛰기 /일시정지 /정지 /대기열 /삭제 /볼륨 /현재곡, 재생 메시지의 ⏯ ⏭ ⏹ 📜 버튼.
 설정: Config/music_config.json — token이 비어 있으면 보스봇 토큰(boss_config.json)을 같이 쓴다.
 같은 토큰이면 슬래시 명령을 덮어쓰지 않도록 자기 명령만 하나씩 등록한다 (RaidBook_music.MUSIC_COMMAND_NAMES).
+
+동시 재생: 봇 계정 하나는 서버당 음성채널 하나에만 들어갈 수 있어서, extra_tokens에 넣은 추가 봇들을
+같은 프로세스에서 음성 전용 클라이언트로 띄운다. 명령·버튼·안내 메시지는 메인 봇이 받고 보내며,
+/재생 때 그 사람의 음성채널에 이미 있는 봇 → 비어 있는 봇 순으로 배정한다.
+대기열·재생곡·볼륨·안내 메시지는 (봇, 서버)마다 따로라 채널끼리 섞이지 않는다.
 """
 import asyncio
 import json
@@ -109,6 +114,8 @@ if [str(c) for c in config.get("command_channel_ids") or []] == [str(_OLD_DEFAUL
 
 # 비어 있으면 모든 채널에서 명령 허용
 COMMAND_CHANNEL_IDS = _int_set(config.get("command_channel_ids"))
+# 음성채널 채팅에서도 음악 명령 허용 (여러 채널 동시 재생용, 동훈님 요청 2026-11-04)
+ALLOW_VOICE_CHAT = bool(config.get("allow_voice_chat", True))
 # 같은 음성채널에 없어도 건너뛰기/정지 등을 할 수 있는 역할 (서버 관리 권한자는 항상 가능)
 CONTROL_ROLE_IDS = _int_set(config.get("control_role_ids"))
 DEFAULT_VOLUME = max(1, min(100, int(config.get("default_volume", 50) or 50)))
@@ -151,7 +158,10 @@ bot.tree.on_error = _tree_on_error
 
 # ── 서버별 재생 상태 ──────────────────────────────────────────────────────
 class GuildPlayer:
-    def __init__(self, guild_id: int):
+    """봇 하나가 서버 하나에서 재생하는 상태. 봇마다 따로라 대기열·재생곡이 섞이지 않는다."""
+
+    def __init__(self, client: discord.Client, guild_id: int):
+        self.client = client
         self.guild_id = guild_id
         self.queue = rbm.MusicQueue(max_size=MAX_QUEUE)
         self.current = None              # 재생 중 Track
@@ -164,18 +174,79 @@ class GuildPlayer:
         self.started_at = 0.0
 
     def voice(self):
-        g = bot.get_guild(self.guild_id)
+        g = self.client.get_guild(self.guild_id)
         return g.voice_client if g else None
 
+    def connected(self) -> bool:
+        vc = self.voice()
+        return bool(vc and vc.is_connected() and vc.channel)
 
-players: dict = {}
+    def busy(self) -> bool:
+        """재생 중·일시정지·대기곡이 있으면 다른 채널로 데려가면 안 된다."""
+        vc = self.voice()
+        return bool(self.current or len(self.queue) or (vc and (vc.is_playing() or vc.is_paused())))
 
 
-def get_player(guild_id: int) -> GuildPlayer:
-    p = players.get(guild_id)
+players: dict = {}             # (id(client), guild_id) → GuildPlayer
+workers: list = []             # 추가 음악봇 (음성 전용 discord.Client)
+_assign_locks: dict = {}       # guild_id → 봇 배정 잠금 (동시에 /재생 해도 같은 봇이 두 채널에 배정되지 않게)
+
+
+def get_player(client: discord.Client, guild_id: int) -> GuildPlayer:
+    key = (id(client), guild_id)
+    p = players.get(key)
     if p is None:
-        p = players[guild_id] = GuildPlayer(guild_id)
+        p = players[key] = GuildPlayer(client, guild_id)
     return p
+
+
+def _clients() -> list:
+    """재생에 쓸 수 있는 봇 (메인 봇 먼저, 로그인 끝난 추가 봇)."""
+    return [bot] + [w for w in workers if w.is_ready()]
+
+
+def _guild_players(guild_id: int) -> list:
+    return [p for p in players.values() if p.guild_id == guild_id]
+
+
+def _player_in_channel(guild_id: int, channel_id: int):
+    for c in _clients():
+        p = get_player(c, guild_id)
+        if p.connected() and p.voice().channel.id == channel_id:
+            return p
+    return None
+
+
+def _pick_player(guild_id: int, channel_id: int):
+    """그 음성채널에 이미 있는 봇 → 음성에 없는 봇 → 놀고 있는 봇 순으로 고른다. 없으면 None."""
+    cands = []
+    for c in _clients():
+        if c.get_guild(guild_id) is None:   # 이 서버에 초대되지 않은 봇
+            continue
+        p = get_player(c, guild_id)
+        cands.append((p, p.voice().channel.id if p.connected() else None, p.busy()))
+    return rbm.pick_bot(cands, channel_id)
+
+
+def _find_player(interaction: discord.Interaction):
+    """조작 대상: 누른 재생 패널의 봇 → 입력한 사람의 음성채널 봇 → 입력한 음성채널 채팅의 봇 → 하나뿐인 재생."""
+    gid = interaction.guild.id
+    msg = getattr(interaction, "message", None)
+    if msg is not None:
+        for p in _guild_players(gid):
+            if p.np_message and p.np_message.id == msg.id:
+                return p
+    member = interaction.user
+    if getattr(member, "voice", None) and member.voice.channel:
+        p = _player_in_channel(gid, member.voice.channel.id)
+        if p:
+            return p
+    if isinstance(interaction.channel, (discord.VoiceChannel, discord.StageChannel)):
+        p = _player_in_channel(gid, interaction.channel.id)
+        if p:
+            return p
+    active = [p for p in _guild_players(gid) if p.connected()]
+    return active[0] if len(active) == 1 else None
 
 
 def _tools():
@@ -196,6 +267,8 @@ def _np_embed(p: GuildPlayer) -> discord.Embed:
     e.add_field(name="길이", value=t.duration_text)
     e.add_field(name="신청", value=t.requester_name or "-")
     e.add_field(name="볼륨", value=f"{round(p.volume * 100)}%")
+    if vc and vc.channel:
+        e.add_field(name="채널", value=f"{vc.channel.mention} · {p.client.user.display_name}")
     if len(p.queue):
         nxt = p.queue.items[0]
         e.set_footer(text=f"다음 곡: {nxt.title[:60]}  (대기 {len(p.queue)}곡)")
@@ -405,20 +478,32 @@ async def _check_channel(interaction: discord.Interaction) -> bool:
     if interaction.guild is None:
         await interaction.response.send_message("서버 채널에서만 사용할 수 있습니다.", ephemeral=True)
         return False
-    if COMMAND_CHANNEL_IDS and interaction.channel_id not in COMMAND_CHANNEL_IDS:
-        mentions = " ".join(f"<#{c}>" for c in COMMAND_CHANNEL_IDS)
-        await interaction.response.send_message(f"음악 명령은 {mentions} 에서 사용해 주세요.", ephemeral=True)
-        return False
-    return True
+    if not COMMAND_CHANNEL_IDS or interaction.channel_id in COMMAND_CHANNEL_IDS:
+        return True
+    if ALLOW_VOICE_CHAT and isinstance(interaction.channel, (discord.VoiceChannel, discord.StageChannel)):
+        return True
+    mentions = " ".join(f"<#{c}>" for c in COMMAND_CHANNEL_IDS)
+    where = f"{mentions} 또는 음성채널 채팅" if ALLOW_VOICE_CHAT else mentions
+    await interaction.response.send_message(f"음악 명령은 {where}에서 사용해 주세요.", ephemeral=True)
+    return False
+
+
+async def _no_player(interaction: discord.Interaction):
+    many = sum(1 for p in _guild_players(interaction.guild.id) if p.connected())
+    if many > 1:
+        msg = (f"지금 {many}개 채널에서 재생 중이에요. 조작할 음악이 나오는 음성채널에 들어가거나, "
+               "그 채널의 재생 패널 버튼을 눌러 주세요.")
+    else:
+        msg = "지금 재생 중인 음악이 없습니다."
+    await interaction.response.send_message(msg, ephemeral=True)
 
 
 async def _check_control(interaction: discord.Interaction) -> GuildPlayer | None:
     if not await _check_channel(interaction):
         return None
-    p = get_player(interaction.guild.id)
-    vc = p.voice()
-    if vc is None or not vc.is_connected():
-        await interaction.response.send_message("지금 재생 중인 음악이 없습니다.", ephemeral=True)
+    p = _find_player(interaction)
+    if p is None or not p.connected():
+        await _no_player(interaction)
         return None
     if not _can_control(interaction.user, p):
         await interaction.response.send_message("봇과 같은 음성채널에 있어야 조작할 수 있습니다.", ephemeral=True)
@@ -469,7 +554,10 @@ async def do_stop(interaction: discord.Interaction):
 async def do_queue(interaction: discord.Interaction):
     if not await _check_channel(interaction):
         return
-    p = get_player(interaction.guild.id)
+    p = _find_player(interaction)
+    if p is None:
+        await _no_player(interaction)
+        return
     e = discord.Embed(title=f"📜 대기열 ({len(p.queue)}곡)", description=_queue_text(p), color=0x3498DB)
     await interaction.response.send_message(embed=e, ephemeral=True)
 
@@ -538,6 +626,15 @@ class MusicControlView(discord.ui.View):
         await do_volume_step(interaction, VOLUME_STEP)
 
 
+def _all_busy_text(guild_id: int) -> str:
+    total = len(_clients())
+    joined = sum(1 for c in _clients() if c.get_guild(guild_id) is not None)
+    text = f"🎵 음악봇 {joined}개가 모두 다른 채널에서 재생 중이에요. 하나가 끝나면 다시 시도해 주세요."
+    if joined < total:
+        text += f"\n(이 서버에 초대되지 않은 음악봇이 {total - joined}개 있어요)"
+    return text
+
+
 # ── 슬래시 명령 ───────────────────────────────────────────────────────────
 @bot.tree.command(name="재생", description="유튜브 링크(영상·재생목록) 또는 검색어로 음악을 재생합니다")
 @app_commands.describe(링크="유튜브 링크 또는 검색어")
@@ -559,12 +656,10 @@ async def cmd_play(interaction: discord.Interaction, 링크: str):
                                                 ephemeral=True)
         return
 
-    p = get_player(interaction.guild.id)
+    gid = interaction.guild.id
     target = member.voice.channel
-    vc = p.voice()
-    if vc and vc.is_connected() and vc.channel.id != target.id and (vc.is_playing() or vc.is_paused()):
-        await interaction.response.send_message(f"지금 {vc.channel.mention} 에서 재생 중입니다. 그 채널로 와 주세요.",
-                                                ephemeral=True)
+    if _pick_player(gid, target.id) is None:
+        await interaction.response.send_message(_all_busy_text(gid), ephemeral=True)
         return
 
     await interaction.response.defer(thinking=True)
@@ -578,23 +673,33 @@ async def cmd_play(interaction: discord.Interaction, 링크: str):
         await interaction.followup.send("⚠ 재생할 영상을 찾지 못했습니다.")
         return
 
-    try:
-        vc = p.voice()
-        if vc is None or not vc.is_connected():
-            vc = await target.connect(self_deaf=True, timeout=20)
-        elif vc.channel.id != target.id:
-            await vc.move_to(target)
-    except Exception as e:
-        log.warning(f"[음성 연결 실패] {target}: {type(e).__name__}: {e}")
-        await interaction.followup.send(f"⚠ 음성채널에 들어가지 못했습니다. 봇에 연결·말하기 권한이 있는지 확인해 주세요.\n`{e}`")
-        return
-
-    p.text_channel_id = interaction.channel_id
-    added = p.queue.add(tracks)
+    # 봇 고르기 → 음성 연결 → 대기열 추가를 한 번에 (그 사이 다른 /재생이 같은 봇을 가져가지 않게)
+    lock = _assign_locks.setdefault(gid, asyncio.Lock())
+    async with lock:
+        p = _pick_player(gid, target.id)
+        if p is None:
+            await interaction.followup.send(_all_busy_text(gid))
+            return
+        try:
+            vc = p.voice()
+            if vc is None or not vc.is_connected():
+                # 연결은 그 봇의 서버/채널 객체로 해야 그 봇이 들어간다
+                channel = p.client.get_channel(target.id)
+                vc = await channel.connect(self_deaf=True, timeout=20)
+            elif vc.channel.id != target.id:
+                await vc.move_to(p.client.get_channel(target.id))
+        except Exception as e:
+            log.warning(f"[음성 연결 실패] {target} ({p.client.user}): {type(e).__name__}: {e}")
+            await interaction.followup.send(
+                f"⚠ 음성채널에 들어가지 못했습니다. 봇에 연결·말하기 권한이 있는지 확인해 주세요.\n`{e}`")
+            return
+        busy = vc.is_playing() or vc.is_paused() or p.current is not None
+        if not busy or not p.text_channel_id:   # 재생 중이면 안내 메시지는 처음 /재생한 채널에 계속
+            p.text_channel_id = interaction.channel_id
+        added = p.queue.add(tracks)
     if added == 0:
         await interaction.followup.send(f"⚠ 대기열이 가득 찼어요 (최대 {MAX_QUEUE}곡). 곡이 끝나거나 `/삭제`로 빼면 다시 추가할 수 있어요.")
         return
-    busy = vc.is_playing() or vc.is_paused()
     if added == 1:
         t = tracks[0]
         head = "🎵 대기열에 추가" if busy else "🎵 곧 재생합니다"
@@ -630,8 +735,8 @@ async def cmd_queue(interaction: discord.Interaction):
 async def cmd_now(interaction: discord.Interaction):
     if not await _check_channel(interaction):
         return
-    p = get_player(interaction.guild.id)
-    if not p.current:
+    p = _find_player(interaction)
+    if p is None or not p.current:
         await interaction.response.send_message("지금 재생 중인 곡이 없습니다.", ephemeral=True)
         return
     await interaction.response.send_message(embed=_np_embed(p), ephemeral=True)
@@ -785,11 +890,16 @@ async def on_guild_join(guild: discord.Guild):
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before, after):
+    await _on_voice_state(bot, member, before, after)
+
+
+async def _on_voice_state(client: discord.Client, member: discord.Member, before, after):
+    """봇마다 자기 음성 연결만 본다 (member.guild는 그 봇의 캐시라 voice_client도 그 봇 것)."""
     vc = member.guild.voice_client
-    p = players.get(member.guild.id)
+    p = players.get((id(client), member.guild.id))
     if p is None:
         return
-    if member.id == bot.user.id:
+    if member.id == client.user.id:
         if after.channel is None:   # 강제 퇴장/연결 끊김 → 상태 정리
             _cancel_idle(p)
             p.queue.clear()
@@ -821,6 +931,59 @@ def _read_token(path: str) -> str:
         return ""
 
 
+def _extra_tokens(main_token: str) -> list:
+    """동시 재생용 추가 봇 토큰. 빈 칸·중복·다른 봇(보스/Watchdog/TTS)과 같은 토큰은 뺀다 (토큰 값은 로그에 남기지 않음)."""
+    others = {main_token}
+    for name in ("boss_config.json", "watchdog_config.json", "tts_config.json"):
+        t = _read_token(get_config_path(name))
+        if t:
+            others.add(t)
+    out = []
+    for i, raw in enumerate(config.get("extra_tokens") or [], 1):
+        t = str(raw or "").strip()
+        if not t:
+            continue
+        if t in others or t in out:
+            log.warning(f"[추가 봇 {i}] 다른 봇과 같은 토큰이라 건너뜁니다 — 음악 전용 봇의 토큰을 넣어 주세요.")
+            continue
+        out.append(t)
+    return out
+
+
+def _make_worker(label: str) -> discord.Client:
+    """음성 전용 추가 봇. 슬래시 명령·버튼은 메인 봇이 받으므로 음성 상태만 본다."""
+    w = discord.Client(intents=intents)
+    w.rb_label = label
+
+    @w.event
+    async def on_ready():
+        log.info(f"[{label} 준비 완료] {w.user} — 서버 {len(w.guilds)}개")
+
+    @w.event
+    async def on_voice_state_update(member, before, after):
+        await _on_voice_state(w, member, before, after)
+
+    return w
+
+
+async def _run_worker(w: discord.Client, token: str):
+    try:
+        await w.start(token)
+    except discord.LoginFailure:
+        log.warning(f"[{w.rb_label}] 토큰이 올바르지 않아 로그인하지 못했습니다 — music_config.json의 extra_tokens를 확인해 주세요.")
+    except Exception as e:
+        log.warning(f"[{w.rb_label}] 종료: {type(e).__name__}: {e}")
+
+
+async def _main(token: str, extras: list):
+    for i, t in enumerate(extras, 2):
+        w = _make_worker(f"음악봇 {i}")
+        workers.append(w)
+        asyncio.create_task(_run_worker(w, t))
+    async with bot:
+        await bot.start(token)
+
+
 def _wait_for_token() -> tuple:
     """(토큰, 보스봇과 공유 여부). 둘 다 비어 있으면 Watchdog 재시작 반복을 피하려고 종료하지 않고 기다린다."""
     warned = False
@@ -840,5 +1003,7 @@ def _wait_for_token() -> tuple:
 
 if __name__ == "__main__":
     _token, SHARED_TOKEN = _wait_for_token()
-    log.info(f"[시작] {'보스봇 토큰 공유' if SHARED_TOKEN else '전용 토큰'}")
-    bot.run(_token, log_handler=None)
+    _extras = _extra_tokens(_token)
+    log.info(f"[시작] {'보스봇 토큰 공유' if SHARED_TOKEN else '전용 토큰'} | 추가 음악봇 {len(_extras)}개 "
+             f"(동시 재생 최대 {1 + len(_extras)}개 채널)")
+    asyncio.run(_main(_token, _extras))

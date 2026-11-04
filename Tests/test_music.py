@@ -94,6 +94,25 @@ def test_ytdlp_args_with_deno():
     assert "--js-runtimes" not in rbm.ytdlp_base_args("")
 
 
+def test_pick_bot_keeps_channels_apart():
+    # 봇 A는 채널 1에서 재생 중, B는 채널 2에서 재생 중, C·D는 비어 있음
+    bots = [("A", 1, True), ("B", 2, True), ("C", None, False), ("D", None, False)]
+    assert rbm.pick_bot(bots, 1) == "A"          # 같은 채널은 같은 봇 (대기열 이어 붙임)
+    assert rbm.pick_bot(bots, 2) == "B"
+    assert rbm.pick_bot(bots, 3) == "C"          # 새 채널은 빈 봇
+    full = [("A", 1, True), ("B", 2, True), ("C", 3, True), ("D", 4, True)]
+    assert rbm.pick_bot(full, 5) is None          # 모두 바쁘면 다른 채널 것을 뺏지 않음
+    idle = [("A", 1, True), ("B", 2, False)]
+    assert rbm.pick_bot(idle, 9) == "B"           # 재생이 끝나 놀고 있는 봇은 옮겨 씀
+
+
+def test_queues_are_separate_per_bot():
+    a, b = rbm.MusicQueue(max_size=10), rbm.MusicQueue(max_size=10)
+    a.add([rbm.Track("a1", "u"), rbm.Track("a2", "u")])
+    b.add([rbm.Track("b1", "u")])
+    assert [t.title for t in a.items] == ["a1", "a2"] and [t.title for t in b.items] == ["b1"]
+
+
 class FakeTree:
     """sync는 목록 전체를 덮어쓰고, upsert는 하나만 바꾸는 Discord 동작 흉내."""
 
