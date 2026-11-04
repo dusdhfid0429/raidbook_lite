@@ -463,11 +463,18 @@ def run_bot(name):
         return
 
     restart_times = []
+    # 이 감시 스레드가 맡은 상태. 재시작(start_bot)이 새 상태를 만들면 이 스레드는 손을 뗀다
+    # — 예전 스레드가 새 상태의 stopped=False를 보고 봇을 하나 더 띄우던 문제(봇 중복 실행) 방지.
+    with bot_states_lock:
+        my_state = bot_states.get(name)
+
+    def _superseded():
+        return bot_states.get(name) is not my_state
 
     while True:
         with bot_states_lock:
             state = bot_states.get(name, {})
-            if state.get("stopped"):
+            if _superseded() or state.get("stopped"):
                 log.info(f"[{name}] 중지 상태 — 대기")
                 return
 
@@ -510,6 +517,9 @@ def run_bot(name):
             else:
                 cmd = [executable]
 
+            with bot_states_lock:
+                if _superseded() or my_state.get("stopped"):
+                    return
             process = subprocess.Popen(
                 cmd,
                 cwd=_SCRIPT_DIR,
@@ -522,6 +532,9 @@ def run_bot(name):
             # Watchdog가 죽으면 이 봇도 함께 종료되도록 Job Object에 등록
             _assign_to_job(process)
             with bot_states_lock:
+                if _superseded() or my_state.get("stopped"):
+                    _kill_tree(process)
+                    return
                 bot_states[name]["process"] = process
                 bot_states[name]["start_time"] = datetime.now()
                 cnt = bot_states[name].get("restart_count", 0)
@@ -554,13 +567,15 @@ def run_bot(name):
             log.info(f"[{name}] 종료 ({format_exit_status(exit_code)})")
             # 비정상 종료 알림 (0=정상, 수동 중지 제외)
             with bot_states_lock:
-                _stopped = bot_states.get(name, {}).get("stopped", False)
+                _stopped = _superseded() or my_state.get("stopped", False)
             if not _stopped and exit_code not in (0, None):
                 _notify(f"❌ {name} 비정상 종료", f"종료 코드: {exit_code}  —  자동 재시작 예정")
         except Exception as e:
             log.info(f"[{name}] 실행 오류: {e}")
 
         with bot_states_lock:
+            if _superseded():
+                return
             bot_states[name]["process"] = None
             bot_states[name]["start_time"] = None
             if bot_states[name].get("stopped"):
@@ -568,6 +583,8 @@ def run_bot(name):
 
         # enabled 토글 체크 — 비활성화 시 재시작 안 함
         with bot_states_lock:
+            if _superseded():
+                return
             if not bot_states.get(name, {}).get("enabled", True):
                 log.info(f"[{name}] 자동 재시작 비활성화 — 중지 유지")
                 bot_states[name]["stopped"] = True
@@ -578,6 +595,30 @@ def run_bot(name):
             bot_states[name]["restart_count"] = bot_states[name].get("restart_count", 0) + 1
         log.info(f"[{name}] {RESTART_DELAY}초 후 재시작...")
         time.sleep(RESTART_DELAY)
+
+
+def _kill_tree(process):
+    """봇 프로세스를 자식까지 종료. PyInstaller onefile exe는 부트로더(부모)가 실제 파이썬 프로세스(자식)를
+    띄우므로 부모만 terminate하면 자식이 고아로 남아 계속 돈다 → Windows에선 taskkill /T로 트리째 종료."""
+    if process is None or process.poll() is not None:
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=15, creationflags=0x08000000)   # CREATE_NO_WINDOW
+        except Exception as e:
+            log.info(f"[종료] taskkill 실패 ({process.pid}): {e}")
+    else:
+        process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        try:
+            process.wait(timeout=5)
+        except Exception:
+            pass
 
 
 def start_bot(name):
@@ -617,11 +658,7 @@ def stop_bot(name):
         process = state.get("process")
 
     if process and process.poll() is None:
-        process.terminate()
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
+        _kill_tree(process)
         log.info(f"[{name}] 프로세스 종료")
     else:
         log.info(f"[{name}] 중지 플래그 설정")
