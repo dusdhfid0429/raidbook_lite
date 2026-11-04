@@ -19,7 +19,7 @@ from discord.ext import commands
 
 import RaidBook_tts as rbt
 from RaidBook_music import find_ffmpeg
-from RaidBook_storage import DailyFileHandler
+from RaidBook_storage import DailyFileHandler, write_json_atomic
 from config_helper import (
     ensure_config_from_template,
     ensure_runtime_tree,
@@ -109,6 +109,17 @@ def _allowed_ids() -> set:
             out.add(cid)
     return out
 
+
+# 동훈님 지정 TTS 채널 (2026-11-04) — 기존 설치본도 1회 이 채널로 바꾼다 (이후 config 수정은 유지)
+_TTS_CHANNEL = 1567368627282378903
+if not config.get("_tts_channel_migrated"):
+    config["allowed_channel_ids"] = [_TTS_CHANNEL]
+    config["_tts_channel_migrated"] = True
+    try:
+        write_json_atomic(CONFIG_PATH, config)
+        log.info(f"[설정] TTS 채널 → {_TTS_CHANNEL}")
+    except Exception as e:
+        log.warning(f"[설정] TTS 채널 저장 실패 (이번 실행만 적용): {e}")
 
 ALLOWED_CHANNEL_IDS = _allowed_ids()   # 비어 있으면 모든 채널
 
