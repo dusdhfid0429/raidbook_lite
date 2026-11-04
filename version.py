@@ -7,7 +7,7 @@ from datetime import datetime
 # 버전 정보
 VERSION_MAJOR = 1
 VERSION_MINOR = 0
-VERSION_PATCH = 35
+VERSION_PATCH = 36
 VERSION_BUILD = 1
 
 # 버전 문자열
@@ -16,7 +16,7 @@ VERSION_FULL = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}.{VERSION_BUILD}
 
 # 릴리즈 정보
 RELEASE_DATE = "2026-11-04"
-RELEASE_NAME = "Lite - 음악봇 전송 상태 진단 로그"
+RELEASE_NAME = "Lite - 음악·TTS 소리 안 나는 문제 수정 (davey 0.1.x 고정)"
 RELEASE_CHANNEL = "stable"  # stable, beta, alpha
 
 # 제품 정보
