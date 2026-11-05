@@ -213,8 +213,11 @@ def get_player(client: discord.Client, guild_id: int) -> GuildPlayer:
 
 
 def _clients() -> list:
-    """재생에 쓸 수 있는 봇 (메인 봇 먼저, 로그인 끝난 추가 봇)."""
-    return [bot] + [w for w in workers if w.is_ready()]
+    """재생에 쓸 수 있는 봇. 추가 음악봇(extra_tokens)이 있으면 그 봇들만 음성에 들어가고,
+    보스봇 토큰을 쓰는 메인 봇은 명령·패널만 맡는다 (동훈님 요청 2026-11-05). 추가 봇이 없으면 메인 봇이 재생."""
+    if workers:
+        return [w for w in workers if w.is_ready()]
+    return [bot]
 
 
 def _guild_players(guild_id: int) -> list:
@@ -1112,5 +1115,5 @@ if __name__ == "__main__":
     _token, SHARED_TOKEN = _wait_for_token()
     _extras = _extra_tokens(_token)
     log.info(f"[시작] {'보스봇 토큰 공유' if SHARED_TOKEN else '전용 토큰'} | 추가 음악봇 {len(_extras)}개 "
-             f"(동시 재생 최대 {1 + len(_extras)}개 채널)")
+             f"(동시 재생 최대 {len(_extras) or 1}개 채널{", 보스봇은 명령만" if _extras else ""})")
     asyncio.run(_main(_token, _extras))

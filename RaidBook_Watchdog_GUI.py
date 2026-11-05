@@ -2368,11 +2368,11 @@ class WatchdogApp(tk.Tk):
         _field(s2, "봇 토큰",       v["tts_token"],  required=False, hide=True,
                tip="TTS 전용 Discord 봇 토큰 (선택)")
 
-        # Step 3 — 추가 음악봇 (선택, 동시 재생 채널 수 = 1 + 토큰 수)
+        # Step 3 — 추가 음악봇 (선택, 동시 재생 채널 수 = 토큰 수, 비우면 보스봇이 재생)
         s3 = _mk()
         _step_header(s3, "\U0001f3b5", "추가 음악봇 설정 (선택)",
                      "봇 하나는 음성채널 하나에서만 재생할 수 있습니다. 토큰을 넣은 수만큼 음악봇이 늘어나\n"
-                     "(1 + 토큰 수)개 채널에서 따로 재생합니다. 기본 음악봇은 Boss Bot 토큰을 같이 씁니다.\n"
+                     "그 수만큼의 채널에서 따로 재생합니다. 토큰을 넣으면 Boss Bot은 음성에 들어가지 않고 명령만 받습니다.\n"
                      "봇마다 디스코드 앱을 따로 만들고 서버에 초대해야 합니다. 다른 봇과 같은 토큰은 안 됩니다.")
         music_rows = tk.Frame(s3, bg=_C["bg"])
         music_rows.pack(fill="x")
