@@ -972,6 +972,7 @@ _ready_once = False
 # ── ⚔️ 전투지원 음성 안내 (보스봇 IPC: {"cmd":"announce","args":[문장, 목소리, [대화방 ID…]]}) ──────────
 IPC_PORT = int(config.get("ipc_port", 7705) or 7705)
 ANNOUNCE_TMP = os.path.join(_RUNTIME_DIR, "Tools", "announce")
+ANNOUNCE_LEAD_SEC = max(0.0, float(config.get("announce_lead_seconds", 1.0) or 0))   # 입장 후 읽기 전 대기
 
 
 async def _announce_clip(text: str, voice: str) -> str:
@@ -996,16 +997,35 @@ async def _stop_music_for_announce(p: GuildPlayer):
     await _delete_np(p)
 
 
+async def _wait_voice_ready(p: GuildPlayer, vc, timeout: float = 6.0):
+    """막 들어간 음성채널은 디스코드 E2EE(DAVE) 키 교환이 끝나기 전에 보낸 소리가 듣는 사람에게 안 들린다
+    (2026-11-05: 새로 들어간 봇이 읽은 대화방 2곳에서 안내가 안 들림). 암호화가 준비될 때까지 기다리고,
+    안 되면 세션을 한 번 새로 맺는다. 준비된 뒤에도 첫 소리가 잘리지 않게 잠깐 쉰다."""
+    loop = asyncio.get_running_loop()
+    end = loop.time() + timeout
+    reinit = False
+    while loop.time() < end:
+        st = _audio_state(vc)
+        if vc.is_connected() and (not st["dave"] or st["encrypt"]):
+            break
+        if not reinit and loop.time() > end - timeout / 2 and st["dave"] and not st["encrypt"]:
+            reinit = True
+            log.warning(f"[전투지원] {p.client.user} @ {vc.channel}: E2EE 준비 안 됨 — 세션 재설정")
+            try:
+                await vc._connection.reinit_dave_session()
+            except Exception as e:
+                log.warning(f"[전투지원] DAVE 재설정 실패: {type(e).__name__}: {e}")
+        await asyncio.sleep(0.1)
+    await asyncio.sleep(ANNOUNCE_LEAD_SEC)
+
+
 async def _announce_with(p: GuildPlayer, channel_ids: list, clip: str):
     for cid in channel_ids:
         try:
             await _stop_music_for_announce(p)
             async with p.lock:
                 vc = await _connect(p, cid)
-                for _ in range(40):   # 연결 직후 잠깐 기다림
-                    if vc.is_connected():
-                        break
-                    await asyncio.sleep(0.05)
+                await _wait_voice_ready(p, vc)
                 if vc.is_playing() or vc.is_paused():
                     vc.stop()
                 done = asyncio.Event()
@@ -1016,7 +1036,9 @@ async def _announce_with(p: GuildPlayer, channel_ids: list, clip: str):
                     await asyncio.wait_for(done.wait(), timeout=30)
                 except asyncio.TimeoutError:
                     vc.stop()
-            log.info(f"[전투지원] {p.client.user} @ {vc.channel} 안내 완료")
+            st = _audio_state(vc)
+            log.info(f"[전투지원] {p.client.user} @ {vc.channel} 안내 완료 | 프레임 {st['frames']} | "
+                     f"DAVE v{st['dave']} 암호화 {'준비됨' if st['encrypt'] else '안 됨'}")
             _schedule_idle(p)   # 안내 뒤 할 일 없으면 idle_disconnect_seconds 뒤 퇴장
         except Exception as e:
             log.warning(f"[전투지원] {p.client.user} → 채널 {cid} 안내 실패: {type(e).__name__}: {e}")
