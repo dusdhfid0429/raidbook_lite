@@ -38,6 +38,7 @@ import RaidBook_clans as rb_clans
 import RaidBook_combat_support as rb_combat
 import RaidBook_broadcast as rb_broadcast
 import RaidBook_verify as rb_verify
+import RaidBook_verify_perms as rb_vperms
 from RaidBook_boss_data import (
     ensure_loot_sheet as _ensure_loot_sheet_core,
     load_all_loot as _load_all_loot_core,
@@ -3735,6 +3736,65 @@ def _save_boss_config():
 
 verifier = rb_verify.Verifier(bot, config, DATA_DIR, save_config=_save_boss_config,
                               default_log_channel=lambda: COMMAND_CHANNEL_ID, logger=log)
+
+
+@bot.tree.command(name="인증권한", description="서버 관리자 전용 — 모든 채널을 '인증됨' 역할만 보이게 바꾸거나(미리보기 후 적용) 되돌려요")
+@discord.app_commands.describe(동작="적용(미리보기 후 ✅) 또는 복구(마지막 백업으로 되돌리기)")
+@discord.app_commands.choices(동작=[discord.app_commands.Choice(name="적용", value="apply"),
+                                  discord.app_commands.Choice(name="복구", value="restore")])
+async def cmd_verify_perms(interaction: discord.Interaction, 동작: str = "apply"):
+    member, guild = interaction.user, interaction.guild
+    if guild is None or not isinstance(member, discord.Member):
+        await interaction.response.send_message("서버 안에서만 쓸 수 있어요.", ephemeral=True)
+        return
+    if not (member.id == guild.owner_id or member.guild_permissions.administrator
+            or member.guild_permissions.manage_guild):
+        await interaction.response.send_message("서버 소유자나 '서버 관리' 권한이 있는 사람만 쓸 수 있어요.", ephemeral=True)
+        return
+    log.info(f"[명령어] /인증권한 {동작} | 사용자: {member.display_name}")
+    verifier.reload()
+    if 동작 == "restore":
+        path = rb_vperms.latest_backup(DATA_DIR)
+        if not path:
+            await interaction.response.send_message("되돌릴 백업이 없어요.", ephemeral=True)
+            return
+        await interaction.response.send_message(f"⏳ `{os.path.basename(path)}` 백업으로 채널 권한을 되돌리는 중…", ephemeral=True)
+        ok, fails = await rb_vperms.restore(guild, path)
+        log.info(f"[인증권한] 복구 {ok}개, 실패 {len(fails)} ({path}) by {member}")
+        await interaction.edit_original_response(
+            content=f"↩️ 채널 {ok}개 권한을 되돌렸어요." + (f"\n⚠️ 실패: {', '.join(fails)[:1500]}" if fails else ""))
+        return
+    role = verifier.find_role(guild)
+    if role is None:
+        await interaction.response.send_message("'인증됨' 역할이 아직 없어요. 보스봇을 다시 시작하면 만들어져요.", ephemeral=True)
+        return
+    if not config.get(rb_verify.EXISTING_FLAG):
+        await interaction.response.send_message(
+            "기존 멤버 일괄 인증이 아직 안 끝났어요. 그 전에 적용하면 모두 채널이 안 보이게 돼서 막아 뒀어요. "
+            "보스봇 시작 안내에서 '기존 멤버 …명에게 역할을 줬어요'를 확인한 뒤 다시 해 주세요.", ephemeral=True)
+        return
+    if not guild.me.guild_permissions.manage_roles:
+        await interaction.response.send_message("봇에 '역할 관리' 권한이 없어 채널 권한을 바꿀 수 없어요.", ephemeral=True)
+        return
+    keep, vcid = verifier.settings.keep_role_suffix, verifier.settings.channel_id
+    plan = rb_vperms.build_plan(guild, role, keep, vcid)
+    if not plan:
+        await interaction.response.send_message("✅ 이미 모든 채널이 인증 권한으로 맞춰져 있어요.", ephemeral=True)
+        return
+
+    async def _apply(btn_interaction):
+        await btn_interaction.edit_original_response(
+            content="⏳ 권한을 백업하고 적용하는 중… (채널이 많으면 1~2분 걸려요)", view=None)
+        path = rb_vperms.save_backup(DATA_DIR, guild, log)
+        fresh = rb_vperms.build_plan(guild, role, keep, vcid)
+        ok, fails = await rb_vperms.apply_plan(fresh)
+        log.info(f"[인증권한] 적용 {ok}개, 실패 {len(fails)} (백업 {path}) by {member}")
+        await btn_interaction.edit_original_response(
+            content=f"🔐 채널 {ok}개에 인증 권한을 적용했어요. 되돌리려면 `/인증권한 복구`"
+                    + (f"\n⚠️ 실패(봇 역할 순서·권한 확인): {', '.join(fails)[:1500]}" if fails else ""))
+
+    await interaction.response.send_message(rb_vperms.preview_text(plan, role, keep, vcid),
+                                            view=rb_vperms.ConfirmView(member.id, _apply), ephemeral=True)
 
 
 @bot.tree.command(name="전투지원", description="전투지원 요청 — 내용을 적으면 전투알림 채널에 올리고 혈맹 대화방에 음성으로 알려요")

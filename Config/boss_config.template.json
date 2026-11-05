@@ -62,8 +62,8 @@
     }
   },
   "verify_channel_id": null,
-  "_verify_comment": "🔐 서버 입장 인증. verify_channel_id = #인증 채널 ID(비면 '인증' 채널 자동 생성), verify.password = 입장 비밀번호(비면 인증 안 됨), verify.role_id = 인증되면 줄 역할 ID(비면 role_name 역할을 찾거나 새로 만들어 저장), verify.max_failures = 이 횟수 틀리면 추방(0=제한 없음), verify.fail_action = kick(추방)/none(안내만), verify.log_channel_id = 기록 채널(비면 보탐-명령). 봇에 '역할 관리'·'멤버 추방' 권한이 있어야 하고, 봇 역할이 '인증됨'보다 위에 있어야 해요. @everyone은 #인증만 보이게, 일반 채널은 '인증됨'만 보이게 서버 설정에서 바꿔 주세요. 고친 뒤 보스봇을 다시 시작하세요.",
-  "verify": {"enabled": true, "password": "", "role_id": null, "role_name": "인증됨", "max_failures": 5, "fail_action": "kick", "log_channel_id": null},
+  "_verify_comment": "🔐 서버 입장 인증. verify_channel_id = #인증 채널 ID(비면 '인증' 채널 자동 생성), verify.password = 입장 비밀번호(비면 인증 안 됨), verify.role_id = 인증되면 줄 역할 ID(비면 role_name 역할을 찾거나 새로 만들어 저장), verify.max_failures = 이 횟수 틀리면 추방(0=제한 없음), verify.fail_action = kick(추방)/none(안내만), verify.log_channel_id = 기록 채널(비면 보탐-명령), verify.keep_role_suffix = /인증권한 때 채널 권한을 남길 역할 이름 끝 글자(기본 운영진, 비우면 전부 지움). 봇에 '역할 관리'·'멤버 추방' 권한이 있어야 하고, 봇 역할이 '인증됨'보다 위에 있어야 해요. @everyone은 #인증만 보이게, 일반 채널은 '인증됨'만 보이게 서버 설정에서 바꿔 주세요. 고친 뒤 보스봇을 다시 시작하세요.",
+  "verify": {"enabled": true, "password": "", "role_id": null, "role_name": "인증됨", "max_failures": 5, "fail_action": "kick", "log_channel_id": null, "keep_role_suffix": "운영진"},
   "auction_currency": "아데나",
   "settlement": {"guild_fee_pct": 30, "operations_pct": 0, "attendee_pct": 70},
   "_settlement_comment": "경매 💰 정산 비율(합 100%) — 혈비/운영진/참석자. 참석자 몫은 그 보스탐 참석자 수로 나눠 인당 분배금. 나누고 남는 자투리는 혈비에 더함",

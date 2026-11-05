@@ -34,7 +34,8 @@ SECTION_COMMENT = (
     "🔐 서버 입장 인증. verify_channel_id = #인증 채널 ID(비면 '인증' 채널 자동 생성), "
     "verify.password = 입장 비밀번호(비면 인증 안 됨), verify.role_id = 인증되면 줄 역할 ID"
     "(비면 role_name 역할을 찾거나 새로 만들어 저장), verify.max_failures = 이 횟수 틀리면 추방(0=제한 없음), "
-    "verify.fail_action = kick(추방)/none(안내만), verify.log_channel_id = 기록 채널(비면 보탐-명령). "
+    "verify.fail_action = kick(추방)/none(안내만), verify.log_channel_id = 기록 채널(비면 보탐-명령), "
+    "verify.keep_role_suffix = /인증권한 때 채널 권한을 남길 역할 이름 끝 글자(기본 운영진, 비우면 전부 지움). "
     "봇에 '역할 관리'·'멤버 추방' 권한이 있어야 하고, 봇 역할이 '인증됨'보다 위에 있어야 해요. "
     "@everyone은 #인증만 보이게, 일반 채널은 '인증됨'만 보이게 서버 설정에서 바꿔 주세요. 고친 뒤 보스봇을 다시 시작하세요."
 )
@@ -57,6 +58,7 @@ def default_section() -> dict:
         "max_failures": DEFAULT_MAX_FAILURES,
         "fail_action": "kick",
         "log_channel_id": None,
+        "keep_role_suffix": "운영진",
     }
 
 
@@ -95,6 +97,8 @@ class Settings:
         self.kick = str(sec.get("fail_action") or "kick").strip().lower() == "kick"
         self.log_channel_id = _cid(sec.get("log_channel_id"))
         self.channel_id = _cid(config.get(CHANNEL_KEY))
+        self.keep_role_suffix = str(sec.get("keep_role_suffix") if sec.get("keep_role_suffix") is not None
+                                    else "운영진").strip()
 
     def check(self, typed) -> bool:
         """비밀번호 비교 (앞뒤 공백 무시, 대소문자 구분). 비밀번호가 비어 있으면 항상 False."""
@@ -267,6 +271,17 @@ class Verifier:
             self.reload()
         return role, notes
 
+    async def grant_bots(self, guild, role):
+        """봇들(보스·음악·TTS)도 인증 역할을 받아야 /인증권한 뒤에도 채널을 볼 수 있다 — 시작할 때마다 확인."""
+        if role is None:
+            return
+        for m in guild.members:
+            if m.bot and role not in m.roles:
+                try:
+                    await m.add_roles(role, reason="RaidBook 인증 — 봇은 항상 인증")
+                except Exception as e:
+                    self._log(f"[인증] 봇 역할 부여 실패 {m}: {e}", warn=True)
+
     async def grant_existing(self, guild, role):
         """처음 한 번만 — 지금 서버에 있는 사람(봇 제외) 모두에게 인증 역할을 준다."""
         if self.config.get(EXISTING_FLAG) or role is None:
@@ -328,6 +343,7 @@ class Verifier:
             return []
         role, notes = await self.ensure_role(guild)
         notes += await self.grant_existing(guild, role)
+        await self.grant_bots(guild, role)
         await self.ensure_panel()
         if not self.settings.password:
             notes.append("⚠️ 인증 비밀번호가 비어 있어요 — boss_config.json의 verify.password를 넣고 보스봇을 다시 시작하세요")
