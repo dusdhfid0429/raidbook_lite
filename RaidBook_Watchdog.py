@@ -1554,38 +1554,73 @@ async def _purgebot(ctx, target: str = "", days: int = 0, confirm: str = ""):
         await ctx.send(f"{head}\n{body}"[:1990])
 
 
+_discord_thread = None   # Discord 봇 스레드 (재시작 시 이전 스레드가 끝날 때까지 기다림)
+
+
+def _reopen_wdog_bot():
+    """close()한 봇을 다시 쓸 수 있게 되돌린다. clear()만으로는 닫힌 aiohttp 커넥터(이전 이벤트 루프 것)가 남아
+    다음 로그인도 'Session is closed'로 실패하므로 커넥터도 비워 새로 만들게 한다."""
+    try:
+        _wdog_bot.clear()
+    except AttributeError:   # 한 번도 로그인하지 못한 봇 (_ready 없음)
+        _wdog_bot._closed = False
+    _wdog_bot.http.connector = discord.utils.MISSING
+
+
 def _run_discord_watchdog():
     global _discord_loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     _discord_loop = loop
     try:
+        # 한 번 close()한 봇은 HTTP 세션이 닫혀 있어 그대로 start()하면 'Session is closed'로 죽는다
+        # → clear()로 내부 상태(세션 포함)를 새로 만든 뒤 시작 (2026-11-05: 설정 마법사 저장 후 패널 무응답)
+        if _wdog_bot.is_closed():
+            _reopen_wdog_bot()
         loop.run_until_complete(_wdog_bot.start(WATCHDOG_TOKEN))
     except Exception as e:
-        log.info(f"[Watchdog Discord] 오류: {e}")
+        log.info(f"[Watchdog Discord] 오류: {type(e).__name__}: {e}")
     finally:
         _discord_loop = None
-        loop.close()
+        try:
+            loop.close()
+        except Exception:
+            pass
+
+
+def _spawn_discord_thread():
+    global _discord_thread
+    t = threading.Thread(target=_run_discord_watchdog, daemon=True)
+    _discord_thread = t
+    t.start()
+    return t
 
 
 def restart_discord_bot():
     """Discord 봇을 안전하게 종료하고 새 토큰/채널로 재시작 (설정 변경 시 GUI에서 사용)."""
-    global _wdog_ready_announced, _wdog_slash_synced
+    global _wdog_ready_announced, _wdog_slash_synced, _panel_refresh_task, _update_check_task
     loop = _discord_loop
     if loop and not loop.is_closed():
         try:
-            asyncio.run_coroutine_threadsafe(_wdog_bot.close(), loop).result(timeout=8)
+            asyncio.run_coroutine_threadsafe(_wdog_bot.close(), loop).result(timeout=20)
         except Exception as e:
-            log.info(f"[Watchdog Discord] 종료 중 오류: {e}")
+            log.info(f"[Watchdog Discord] 종료 중 오류: {type(e).__name__}: {e}")
+    old = _discord_thread
+    if old is not None and old.is_alive():
+        old.join(timeout=20)   # 이전 루프가 끝나야 같은 봇 객체로 다시 시작할 수 있다
+        if old.is_alive():
+            log.info("[Watchdog Discord] 이전 연결이 아직 끝나지 않아 재시작을 건너뜀 — Watchdog을 다시 켜 주세요")
+            return
 
     # Bot.__init__을 다시 호출하면 decorator로 등록된 명령어가 사라질 수 있다.
-    # 같은 Bot 객체를 재사용해 명령 테이블을 유지한다.
+    # 같은 Bot 객체를 재사용해 명령 테이블을 유지한다 (세션은 _run_discord_watchdog에서 clear()로 새로 만듦).
     _wdog_ready_announced = False
     _wdog_slash_synced = False
-    time.sleep(2)
+    _panel_refresh_task = None    # 이전 루프의 작업은 루프와 함께 끝났으므로 on_ready에서 다시 만든다
+    _update_check_task = None
+    time.sleep(1)
     if WATCHDOG_TOKEN and (ADMIN_CHANNEL_ID or config.get("auto_create_channels", True)):
-        t = threading.Thread(target=_run_discord_watchdog, daemon=True)
-        t.start()
+        _spawn_discord_thread()
         log.info("[Watchdog Discord] Discord 봇 재시작됨")
 
 
@@ -1622,8 +1657,7 @@ def start_discord_bot_thread():
     """Watchdog Discord 봇을 백그라운드 스레드로 시작 (token/channel 설정된 경우만)."""
     # 관리 채널이 비어 있어도 시작 — on_ready에서 자동 생성 (auto_create_channels)
     if WATCHDOG_TOKEN and (ADMIN_CHANNEL_ID or config.get("auto_create_channels", True)):
-        t = threading.Thread(target=_run_discord_watchdog, daemon=True)
-        t.start()
+        t = _spawn_discord_thread()
         log.info(f"[Watchdog Discord] 봇 시작 중... (관리 채널: {ADMIN_CHANNEL_ID or '자동 생성'})")
         return t
     log.info("[Watchdog Discord] token 또는 admin_channel_id 미설정 — Discord 봇 비활성")
