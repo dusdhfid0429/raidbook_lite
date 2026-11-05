@@ -1566,7 +1566,7 @@ async def _commit_loot_record(v, interaction, new_text, new_acquirers, opened_re
                     image_file, image_kwargs = _boss_image_file_and_kwargs(v.boss_name, target_msg)
                     embed = make_attend_embed(v.boss_name, len(v.attendees), names, v.boss_time,
                                               expired=False, loot=new_text, disable_time=v.disable_time,
-                                              loot_acquirers=new_acquirers, **image_kwargs)
+                                              loot_acquirers=new_acquirers, **image_kwargs, attendee_ids=v.attendees)
                     await _edit_message_with_image(
                         target_msg,
                         embed=embed,
@@ -1614,7 +1614,7 @@ async def _commit_loot_record(v, interaction, new_text, new_acquirers, opened_re
                     image_file, image_kwargs = _boss_image_file_and_kwargs(v.boss_name, target_msg)
                     embed = make_attend_embed(v.boss_name, len(v.attendees), names, v.boss_time,
                                               expired=True, loot=new_text, disable_time=v.disable_time,
-                                              loot_acquirers=new_acquirers, **image_kwargs)
+                                              loot_acquirers=new_acquirers, **image_kwargs, attendee_ids=v.attendees)
                     await _edit_message_with_image(
                         target_msg,
                         embed=embed,
@@ -2119,7 +2119,7 @@ class AttendView(ui.View):
         image_file, image_kwargs = _boss_image_file_and_kwargs(self.boss_name, message)
         embed = make_attend_embed(self.boss_name, len(self.attendees), names, self.boss_time,
                                   expired=True, loot=self.loot, disable_time=self.disable_time,
-                                  loot_acquirers=getattr(self, "loot_acquirers", ""), **image_kwargs)
+                                  loot_acquirers=getattr(self, "loot_acquirers", ""), **image_kwargs, attendee_ids=self.attendees)
         await _edit_message_with_image(
             message,
             embed=embed,
@@ -2266,7 +2266,7 @@ class AttendView(ui.View):
                     ", ".join(id_to_name.get(u, u) for u in self.attendees) or "없음",
                     self.boss_time, loot=self.loot, disable_time=self.disable_time,
                     loot_acquirers=getattr(self, "loot_acquirers", ""),
-                    **image_kwargs, **self._make_confirmed_embed_kwargs(id_to_name),
+                    **image_kwargs, **self._make_confirmed_embed_kwargs(id_to_name), attendee_ids=self.attendees
                 )
                 await _edit_message_with_image(msg, embed=embed, view=self, image_file=image_file,
                                                content=_boss_alert_content(self.boss_name, self.boss_time))
@@ -2331,7 +2331,7 @@ class AttendView(ui.View):
                                       disable_time=self.disable_time,
                                       countdown_text=countdown_text,
                                       loot_acquirers=getattr(self, "loot_acquirers", ""),
-                                      **image_kwargs, **confirmed_kwargs)
+                                      **image_kwargs, **confirmed_kwargs, attendee_ids=self.attendees)
             try:
                 await _edit_message_with_image(
                     interaction.message,
@@ -2401,7 +2401,7 @@ class AttendView(ui.View):
                                       disable_time=self.disable_time,
                                       countdown_text=countdown_text,
                                       loot_acquirers=getattr(self, "loot_acquirers", ""),
-                                      **image_kwargs, **confirmed_kwargs)
+                                      **image_kwargs, **confirmed_kwargs, attendee_ids=self.attendees)
             try:
                 await _edit_message_with_image(
                     interaction.message,
@@ -2868,15 +2868,23 @@ def _clan_guild():
     return bot.guilds[0] if len(bot.guilds) == 1 else None
 
 
-def _clan_split(names):
-    """참석자 이름 문자열 → (혈맹별 그룹, 미지정) / 혈맹 구분을 안 쓰면 None.
-    이름 → UID는 user_mapping(인원체크 때 기록), 없으면 서버 표시 이름으로 찾는다."""
+def _clan_guild_if_enabled():
+    """혈맹 구분을 쓰면 그 서버, 아니면 None (설정이 비었거나 서버에 혈맹 역할이 하나도 없음)."""
     if not CLAN_ROLES:
         return None
     guild = _clan_guild()
     if guild is None:
         return None
     if not any(r.name.strip() in {n for n, _ in CLAN_ROLES} for r in guild.roles):
+        return None
+    return guild
+
+
+def _clan_split(names):
+    """참석자 이름 문자열 → (혈맹별 그룹, 미지정) / 혈맹 구분을 안 쓰면 None.
+    이름 → UID는 user_mapping(인원체크 때 기록), 없으면 서버 표시 이름으로 찾는다."""
+    guild = _clan_guild_if_enabled()
+    if guild is None:
         return None
     name_to_uid = _name_to_uid_mapping()
 
@@ -2895,10 +2903,29 @@ def _clan_split(names):
     return rb_clans.group_by_clan(rb_clans.split_names(names), CLAN_ROLES, roles_of)
 
 
+def _clan_split_ids(attendee_ids):
+    """참석자 UID 목록 → (혈맹별 그룹, 미지정) / 혈맹 구분을 안 쓰면 None.
+    역할은 UID로 서버 멤버를 바로 찾아 보고, 화면에는 user_mapping 이름을 쓴다."""
+    guild = _clan_guild_if_enabled()
+    if guild is None:
+        return None
+    id_to_name = _load_id_to_name_mapping()
+
+    def roles_of(uid):
+        member = None
+        if str(uid).isdigit():
+            member = guild.get_member(int(uid))
+        else:   # 예전 기록에 이름이 들어 있는 경우
+            member = guild.get_member_named(str(uid))
+        return {r.name.strip() for r in member.roles} if member is not None else set()
+
+    return rb_clans.group_by_clan([str(u) for u in attendee_ids], CLAN_ROLES, roles_of,
+                                  label_of=lambda u: id_to_name.get(u, u))
+
+
 def clan_count_summary(attendee_ids) -> str:
     """관리자 확인 메시지용 ' (정도 4 · 슈퍼맨 2 · 미지정 1)' — 혈맹 구분을 안 쓰면 빈 문자열."""
-    id_to_name = _load_id_to_name_mapping()
-    clan = _clan_split(", ".join(id_to_name.get(str(u), str(u)) for u in attendee_ids))
+    clan = _clan_split_ids(attendee_ids)
     return f" ({rb_clans.format_clan_counts(*clan)})" if clan else ""
 
 
@@ -2914,7 +2941,8 @@ def _clan_summary_for(message_id) -> str:
 def make_attend_embed(boss_name, count, names, boss_time=None, expired=False, loot="",
                       disable_time=None, thumbnail_file=None, image_url="", image_filename="",
                       confirmed_names=None, late_names=None, confirmed_at="", countdown_text="",
-                      loot_acquirers=""):
+                      loot_acquirers="", attendee_ids=None):
+    """attendee_ids(참석자 UID 목록)를 주면 혈맹 분류를 UID로 바로 한다 (이름 → UID 역조회 없음)."""
     expired = expired or _close_time_passed(disable_time)   # 화면도 마감 시각 기준
     embed = discord.Embed(color=0x888888 if expired else 0x00ff00)
     embed.title = f"📢 {boss_name} 보스 출현 알림"
@@ -2952,7 +2980,7 @@ def make_attend_embed(boss_name, count, names, boss_time=None, expired=False, lo
     else:
         prefix = f"✅ {'최종' if expired else '현재'} 참석"
         try:
-            clan = _clan_split(names)
+            clan = _clan_split_ids(attendee_ids) if attendee_ids is not None else _clan_split(names)
         except Exception as e:   # 역할 조회 실패해도 알림은 예전 형식으로 그린다
             log.info(f"[혈맹 구분 실패] {type(e).__name__}: {e}")
             clan = None
@@ -3090,7 +3118,7 @@ def _schedule_party_confirm_task(attend_view: "AttendView", message_id: int, cha
                     attend_view.boss_time, loot=attend_view.loot, disable_time=attend_view.disable_time,
                     loot_acquirers=getattr(attend_view, "loot_acquirers", ""),
                     **image_kwargs,
-                    countdown_text=f"⏳ 파티 확정까지 **{mins}분**",
+                    countdown_text=f"⏳ 파티 확정까지 **{mins}분**", attendee_ids=attend_view.attendees
                 )
                 await _edit_message_with_image(msg, embed=embed, view=attend_view, image_file=image_file,
                                                content=_boss_alert_content(attend_view.boss_name, attend_view.boss_time))
@@ -3298,7 +3326,7 @@ async def _voice_check_locked(message_id, voice_channel=None) -> tuple | None:
                                   loot=view.loot, disable_time=view.disable_time,
                                   countdown_text=view._get_countdown_text(),
                                   loot_acquirers=getattr(view, "loot_acquirers", ""),
-                                  **image_kwargs, **confirmed_kwargs)
+                                  **image_kwargs, **confirmed_kwargs, attendee_ids=view.attendees)
         await _edit_message_with_image(msg, embed=embed, view=view, image_file=image_file,
                                        content=_boss_alert_content(view.boss_name, view.boss_time))
     except Exception as e:
@@ -3473,7 +3501,7 @@ async def _repair_closed_alert_buttons(limit=300):
                     embed = make_attend_embed(
                         boss_name, len(attendees), ", ".join(id2n.get(u, u) for u in attendees) or "없음",
                         boss_time, expired=True, loot=loot_text or "", disable_time=closed,
-                        loot_acquirers=load_loot_acquirers_from_excel(msg.id) or "", **image_kwargs)
+                        loot_acquirers=load_loot_acquirers_from_excel(msg.id) or "", **image_kwargs, attendee_ids=attendees)
                     await _edit_message_with_image(msg, embed=embed, view=view, image_file=image_file,
                                                    content=_boss_alert_content(boss_name, boss_time, expired=True))
                 else:
@@ -4364,7 +4392,7 @@ async def _apply_attendee_edits(action, msg_id, boss_name, boss_time, sheet_name
                     boss_name, len(updated_attendees), names,
                     boss_time, expired=not is_active,
                     loot=loot_text, loot_acquirers=loot_acq, disable_time=disable_time,
-                    **image_kwargs,
+                    **image_kwargs, attendee_ids=updated_attendees
                 )
                 await _edit_message_with_image(
                     target_msg,
@@ -4962,7 +4990,7 @@ async def sync(ctx, message_id: str):
     embed = make_attend_embed(
         boss_name, len(attendees), names, boss_time or "알 수 없음",
         expired=True, loot=loot_text or "", loot_acquirers=loot_acq or "",
-        **image_kwargs,
+        **image_kwargs, attendee_ids=attendees
     )
     try:
         await _edit_message_with_image(

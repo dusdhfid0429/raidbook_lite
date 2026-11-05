@@ -51,11 +51,12 @@ def split_names(names_text) -> list:
     return [n.strip() for n in text.split(", ") if n.strip()]
 
 
-def group_by_clan(names, clan_roles, roles_of) -> tuple:
+def group_by_clan(names, clan_roles, roles_of, label_of=None) -> tuple:
     """참석자 이름 목록을 혈맹별로 나눈다.
     roles_of(이름) → 그 멤버의 역할 이름 집합 (못 찾으면 빈 집합).
     반환: ([(혈맹명, 이모지, [이름…])…], [미지정 이름…]). 혈맹 순서는 clan_roles 순서.
-    역할이 둘 이상이면 앞쪽 혈맹에만 넣고 이름 뒤에 ⚠️ (중복 집계 방지)."""
+    역할이 둘 이상이면 앞쪽 혈맹에만 넣고 이름 뒤에 ⚠️ (중복 집계 방지).
+    label_of(사람) → 화면에 쓸 이름 (UID로 분류하고 이름으로 보여 줄 때). 없으면 그대로."""
     groups = [(name, emoji, []) for name, emoji in clan_roles]
     unassigned = []
     for person in names:
@@ -64,10 +65,11 @@ def group_by_clan(names, clan_roles, roles_of) -> tuple:
         except Exception:
             roles = set()
         hits = [i for i, (name, _) in enumerate(clan_roles) if name in roles]
+        label = label_of(person) if label_of else person
         if not hits:
-            unassigned.append(person)
+            unassigned.append(label)
         else:
-            groups[hits[0]][2].append(person + (BOTH_ROLES_MARK if len(hits) > 1 else ""))
+            groups[hits[0]][2].append(label + (BOTH_ROLES_MARK if len(hits) > 1 else ""))
     return groups, unassigned
 
 

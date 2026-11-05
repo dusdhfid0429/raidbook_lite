@@ -108,6 +108,14 @@ def test_convert_legacy_description():
     assert rbc.convert_legacy_description("") is None
 
 
+def test_group_by_uid_with_labels():
+    roles = {"1": {"정도"}, "2": {"슈퍼맨"}, "3": set()}
+    names = {"1": "같은이름", "2": "같은이름", "3": "손님"}
+    groups, unassigned = rbc.group_by_clan(["1", "2", "3"], TWO, lambda u: roles[u], label_of=names.get)
+    assert groups == [("정도", "⚔️", ["같은이름"]), ("슈퍼맨", "🦸", ["같은이름"])], groups
+    assert unassigned == ["손님"]
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):
