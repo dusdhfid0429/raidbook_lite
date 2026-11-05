@@ -727,7 +727,9 @@ def _all_busy_text(guild_id: int, channel_id: int = 0) -> str:
             miss = _missing_voice_perms(c, channel_id)
             if miss:
                 no_perm.append(f"{c.user.display_name}({'·'.join(miss)})")
-    text = "🎵 이 채널에 들어갈 수 있는 음악봇이 모두 다른 채널에서 재생 중이에요. 하나가 끝나면 다시 시도해 주세요."
+    in_use = sum(1 for c in joined if get_player(c, guild_id).connected())
+    text = (f"🎵 현재 사용 가능한 뮤직봇이 없어요 ({in_use}/{len(joined)}). "
+            "다른 채널 재생이 끝나면 다시 시도해 주세요.")
     if no_perm:
         text += f"\n이 채널 권한이 없는 봇: {', '.join(no_perm)} — 채널 권한에서 허용해 주세요."
     if len(joined) < total:
