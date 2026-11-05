@@ -4,7 +4,7 @@
 등록된 알림에는 요청자 혈맹(연합)의 전투방 바로가기 링크, 참석자(혈맹별), 인원체크·➕ 인원 추가·➖ 인원 제거 버튼.
 채널 ID는 전부 boss_config.json에서 고친다:
   combat_alert_channel_id               전투알림 채널 (비면 'RaidBook' 카테고리에 '전투-알림' 자동 생성)
-  combat_support.clans.<혈맹>.chat_voice_channel_id     TTS로 요청을 읽어 줄 그 혈맹 대화방(음성채널)
+  combat_support.tts_channel_ids                       TTS로 요청을 읽어 줄 대화방(음성채널) ID 목록 — 적힌 개수만큼 차례로 읽음
   combat_support.clans.<혈맹>.combat_room_channel_id    그 혈맹이 속한 연합 카테고리의 전투방(음성채널)
 상태는 Data/combat_support.json (재시작 후에도 버튼 동작).
 """
@@ -52,15 +52,15 @@ def default_section(clan_roles) -> dict:
         "tts": True,
         "tts_voice": "2",
         "tts_template": "전투지원 요청, {content}",
+        "tts_channel_ids": [],
         "default_combat_room_channel_id": None,
-        "clans": {name: {"chat_voice_channel_id": None, "combat_room_channel_id": None}
-                  for name, _ in clan_roles},
+        "clans": {name: {"combat_room_channel_id": None} for name, _ in clan_roles},
     }
 
 
 SECTION_COMMENT = (
-    "/전투지원 설정. clans.<혈맹 역할 이름>.chat_voice_channel_id = TTS로 요청을 읽어 줄 그 혈맹 대화방(음성채널) ID, "
-    "combat_room_channel_id = 요청자가 그 혈맹이면 알림에 링크할 연합 카테고리의 전투방(음성채널) ID — 같은 연합이면 같은 ID를 넣으면 돼요. "
+    "/전투지원 설정. tts_channel_ids = TTS로 요청을 읽어 줄 대화방(음성채널) ID 목록 — 적힌 개수만큼 한 곳씩 차례로 읽어요 (1개면 1번, 2개면 2번). "
+    "clans.<혈맹 역할 이름>.combat_room_channel_id = 요청자가 그 혈맹이면 알림에 링크할 연합 카테고리의 전투방(음성채널) ID — 같은 연합이면 같은 ID를 넣으면 돼요. "
     "default_combat_room_channel_id = 혈맹 역할이 없는 요청자용 전투방. max_length = 내용 글자 수 제한, "
     "tts_template = 읽을 문장 ({content}=내용, {clan}=요청자 혈맹, {name}=요청자). 채널을 고친 뒤 보스봇을 다시 시작하세요."
 )
@@ -84,7 +84,7 @@ def ensure_section(config, clan_roles) -> bool:
             changed = True
         for name, _ in clan_roles:
             if name not in clans:
-                clans[name] = {"chat_voice_channel_id": None, "combat_room_channel_id": None}
+                clans[name] = {"combat_room_channel_id": None}
                 changed = True
     if "_combat_support_comment" not in config:
         config["_combat_support_comment"] = SECTION_COMMENT
@@ -109,10 +109,12 @@ class Settings:
         self.tts_template = str(sec.get("tts_template") or "전투지원 요청, {content}")
         self.default_room = _cid(sec.get("default_combat_room_channel_id"))
         self.clan_roles = list(clan_roles)
-        self.chat_rooms, self.combat_rooms = {}, {}
+        raw = sec.get("tts_channel_ids")
+        raw = raw if isinstance(raw, list) else [raw]
+        self.tts_rooms = [c for c in (_cid(v) for v in raw) if c]
+        self.combat_rooms = {}
         for name, item in (sec.get("clans") or {}).items():
             if isinstance(item, dict):
-                self.chat_rooms[name] = _cid(item.get("chat_voice_channel_id"))
                 self.combat_rooms[name] = _cid(item.get("combat_room_channel_id"))
         self.alert_channel_id = _cid(config.get(ALERT_CHANNEL_KEY))
 
@@ -128,16 +130,8 @@ class Settings:
         return (self.combat_rooms.get(clan_name) if clan_name else None) or self.default_room
 
     def tts_channels(self) -> list:
-        """요청을 읽어 줄 혈맹 대화방 ID (혈맹 순서, 중복 제거)."""
-        out = []
-        for name, _ in self.clan_roles:
-            cid = self.chat_rooms.get(name)
-            if cid and cid not in out:
-                out.append(cid)
-        for name, cid in self.chat_rooms.items():   # clan_roles에 없는 이름으로 적어 둔 대화방도 읽는다
-            if cid and cid not in out:
-                out.append(cid)
-        return out
+        """요청을 읽어 줄 대화방 ID — 설정에 적힌 순서·개수 그대로 (1개면 1번, 2개면 2번)."""
+        return list(self.tts_rooms)
 
     def tts_text(self, content, clan_name="", name="") -> str:
         try:
@@ -313,11 +307,11 @@ class CombatSupport:
         if not rec["combat_room_id"]:
             note += "\n-# 전투방 채널 ID가 아직 없어 바로가기 링크는 빠졌어요."
         if s.tts and not spoken:
-            note += "\n-# 혈맹 대화방 TTS 안내는 못 했어요 (대화방 채널 ID 미설정 또는 TTS 봇 꺼짐)."
+            note += "\n-# 대화방 TTS 안내는 못 했어요 (tts_channel_ids 미설정 또는 TTS 봇 꺼짐)."
         await interaction.followup.send(note, ephemeral=True)
 
     async def announce(self, rec) -> int:
-        """각 혈맹 대화방에 TTS로 요청을 읽어 준다 (TTS 봇이 대기열로 차례대로 돈다). 반환: 보낸 채널 수."""
+        """설정된 대화방마다 TTS로 요청을 읽어 준다 (TTS 봇이 대기열로 차례대로 돈다). 반환: 보낸 채널 수."""
         s = self.settings
         if not s.tts or not self.tts_port:
             return 0

@@ -20,7 +20,8 @@ def test_ensure_section_adds_placeholders_once():
     sec = config["combat_support"]
     assert sec["max_length"] == 15
     assert set(sec["clans"]) == {"정도", "슈퍼맨", "썰자"}
-    assert sec["clans"]["정도"] == {"chat_voice_channel_id": None, "combat_room_channel_id": None}
+    assert sec["clans"]["정도"] == {"combat_room_channel_id": None}
+    assert sec["tts_channel_ids"] == []
     assert cs.ensure_section(config, CLANS) is False
     # 운영진이 넣은 값은 유지, 새 혈맹만 추가
     sec["clans"]["정도"]["combat_room_channel_id"] = 111
@@ -33,9 +34,10 @@ def test_settings_rooms_and_tts():
     config = {"combat_alert_channel_id": "999"}
     cs.ensure_section(config, CLANS)
     clans = config["combat_support"]["clans"]
-    clans["정도"].update(chat_voice_channel_id="11", combat_room_channel_id="100")
-    clans["슈퍼맨"].update(chat_voice_channel_id=22, combat_room_channel_id=100)   # 같은 연합 → 같은 전투방
-    clans["썰자"].update(chat_voice_channel_id=11, combat_room_channel_id=None)
+    clans["정도"].update(combat_room_channel_id="100")
+    clans["슈퍼맨"].update(combat_room_channel_id=100)   # 같은 연합 → 같은 전투방
+    clans["썰자"].update(combat_room_channel_id=None)
+    config["combat_support"]["tts_channel_ids"] = ["11", 22, None, ""]
     config["combat_support"]["default_combat_room_channel_id"] = 300
     s = cs.Settings(config, CLANS)
     assert s.alert_channel_id == 999
@@ -45,7 +47,11 @@ def test_settings_rooms_and_tts():
     assert s.combat_room_for("정도") == 100
     assert s.combat_room_for("썰자") == 300     # 전투방 미설정 → 기본 전투방
     assert s.combat_room_for("") == 300
-    assert s.tts_channels() == [11, 22]          # 중복 대화방은 한 번만
+    assert s.tts_channels() == [11, 22]          # 적힌 ID 개수만큼 (빈 칸 제외)
+    config["combat_support"]["tts_channel_ids"] = [11]
+    assert cs.Settings(config, CLANS).tts_channels() == [11]   # 1개면 1번
+    config["combat_support"]["tts_channel_ids"] = 33            # 목록 대신 숫자 하나도 허용
+    assert cs.Settings(config, CLANS).tts_channels() == [33]
     assert s.tts_text("축순 3번", "정도", "투신") == "전투지원 요청, 축순 3번"
     config["combat_support"]["tts_template"] = "{clan} {name} 전투지원, {content} {oops}"
     assert cs.Settings(config, CLANS).tts_text("축순 3번") == "전투지원 요청, 축순 3번"
@@ -113,8 +119,7 @@ def test_embed_with_and_without_clans():
 def test_announce_sends_one_speak_per_clan_room():
     config = {}
     cs.ensure_section(config, CLANS)
-    config["combat_support"]["clans"]["정도"]["chat_voice_channel_id"] = 11
-    config["combat_support"]["clans"]["슈퍼맨"]["chat_voice_channel_id"] = 22
+    config["combat_support"]["tts_channel_ids"] = [11, 22]
     sent = []
 
     async def fake_ipc(port, cmd, args, **kw):

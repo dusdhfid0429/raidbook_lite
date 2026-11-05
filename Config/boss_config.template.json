@@ -41,7 +41,7 @@
   "auction_voice_count": true,
   "_auction_manual_close_comment": "true면 진행판 아이템은 진행자(운영진)가 ⏱️ 경매 마감을 눌러야 카운트(생성 시 지정, 기본 5초) 시작 — 카운트 중 입찰이 오면 카운트 취소 후 경매 계속, 입찰 없이 누르면 유찰. auction_voice_count가 true면 TTS 봇이 경매장 음성채널에서 숫자를 읽음 (TTS 봇 실행 필요)",
   "combat_alert_channel_id": null,
-  "_combat_support_comment": "/전투지원 설정. combat_alert_channel_id = 전투알림 채널 ID (비우면 RaidBook 카테고리에 '전투-알림' 자동 생성). clans.<혈맹 역할 이름>.chat_voice_channel_id = TTS로 요청을 읽어 줄 그 혈맹 대화방(음성채널) ID, combat_room_channel_id = 요청자가 그 혈맹이면 알림에 링크할 연합 카테고리의 전투방(음성채널) ID — 같은 연합이면 같은 ID를 넣으면 돼요. default_combat_room_channel_id = 혈맹 역할이 없는 요청자용 전투방. max_length = 내용 글자 수 제한, tts_template = 읽을 문장 ({content}=내용, {clan}=요청자 혈맹, {name}=요청자). 채널을 고친 뒤 보스봇을 다시 시작하세요.",
+  "_combat_support_comment": "/전투지원 설정. combat_alert_channel_id = 전투알림 채널 ID (비우면 RaidBook 카테고리에 '전투-알림' 자동 생성). tts_channel_ids = TTS로 요청을 읽어 줄 대화방(음성채널) ID 목록 — 적힌 개수만큼 한 곳씩 차례로 읽어요 (1개면 1번, 2개면 2번). clans.<혈맹 역할 이름>.combat_room_channel_id = 요청자가 그 혈맹이면 알림에 링크할 연합 카테고리의 전투방(음성채널) ID — 같은 연합이면 같은 ID를 넣으면 돼요. default_combat_room_channel_id = 혈맹 역할이 없는 요청자용 전투방. max_length = 내용 글자 수 제한, tts_template = 읽을 문장 ({content}=내용, {clan}=요청자 혈맹, {name}=요청자). 채널을 고친 뒤 보스봇을 다시 시작하세요.",
   "combat_support": {
     "enabled": true,
     "max_length": 15,
@@ -49,13 +49,14 @@
     "tts": true,
     "tts_voice": "2",
     "tts_template": "전투지원 요청, {content}",
+    "tts_channel_ids": [],
     "default_combat_room_channel_id": null,
     "clans": {
-      "정도": {"chat_voice_channel_id": null, "combat_room_channel_id": null},
-      "슈퍼맨": {"chat_voice_channel_id": null, "combat_room_channel_id": null},
-      "썰자": {"chat_voice_channel_id": null, "combat_room_channel_id": null},
-      "방다빼": {"chat_voice_channel_id": null, "combat_room_channel_id": null},
-      "복덕방": {"chat_voice_channel_id": null, "combat_room_channel_id": null}
+      "정도": {"combat_room_channel_id": null},
+      "슈퍼맨": {"combat_room_channel_id": null},
+      "썰자": {"combat_room_channel_id": null},
+      "방다빼": {"combat_room_channel_id": null},
+      "복덕방": {"combat_room_channel_id": null}
     }
   },
   "auction_currency": "아데나",
