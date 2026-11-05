@@ -6297,6 +6297,50 @@ async def voicecheck(ctx, message_id: str = None):
     await ctx.send((f"🎙 <#{vc.id}> 기준\n" + "\n".join(lines))[:1990])
 
 
+def _is_headcount_staff(member) -> bool:
+    """/인원현황 권한: 역할 이름이 '운영진'으로 끝나는 각 혈맹 운영진 + 서버 소유자·관리 권한자."""
+    if not isinstance(member, discord.Member):
+        return False
+    if member.id == member.guild.owner_id:
+        return True
+    perms = member.guild_permissions
+    if perms.administrator or perms.manage_guild:
+        return True
+    return any(rb_clans.is_staff_role(r.name) for r in member.roles)
+
+
+@bot.hybrid_command(name="인원현황", aliases=["headcount"])
+async def headcount(ctx):
+    """명령을 입력한 음성채널의 현재 인원을 혈맹별 숫자로 그 채널 채팅에 표시 (보스 알림은 건드리지 않음)."""
+    async def deny(text):
+        await ctx.send(text, ephemeral=True)
+
+    if not _is_headcount_staff(ctx.author):
+        await deny("⛔ 운영진만 쓸 수 있어요.")
+        return
+    vc = ctx.channel if isinstance(ctx.channel, (discord.VoiceChannel, discord.StageChannel)) else None
+    if vc is None and isinstance(ctx.author, discord.Member) and ctx.author.voice:
+        vc = ctx.author.voice.channel
+    if vc is None:
+        await deny("❌ 음성채널 채팅에서 입력하거나, 음성채널에 접속한 상태로 사용해 주세요.")
+        return
+    members = _collect_voice_members(vc.guild, vc)
+    groups, unassigned = None, []
+    if CLAN_ROLES:
+        def roles_of(uid):
+            m = vc.guild.get_member(int(uid))
+            return {r.name.strip() for r in m.roles} if m is not None else set()
+        groups, unassigned = rb_clans.group_by_clan(list(members), CLAN_ROLES, roles_of)
+    text = rb_clans.format_headcount(vc.name, datetime.now().strftime("%H:%M"),
+                                     len(members), groups, unassigned)
+    log.info(f"[인원현황] {vc.name}({vc.id}) user:{ctx.author.id} | {text.splitlines()[1:]}")
+    if ctx.channel.id == vc.id:
+        await ctx.send(text)
+    else:
+        await vc.send(text)
+        await deny(f"✅ <#{vc.id}> 채팅에 인원현황을 올렸어요.")
+
+
 @bot.hybrid_command()
 async def collectmembers(ctx):
     """서버 전체 멤버의 uid → DisplayName을 user_mapping.json에 저장.

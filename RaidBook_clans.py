@@ -92,6 +92,27 @@ def format_clan_counts(groups, unassigned) -> str:
     return " · ".join(parts)
 
 
+STAFF_ROLE_SUFFIX = "운영진"
+
+
+def is_staff_role(role_name) -> bool:
+    """각 혈맹 운영진 역할인지 — 이름이 '운영진'으로 끝나면 (운영진, 슈퍼맨운영진, 썰자운영진 …)."""
+    return str(role_name or "").strip().endswith(STAFF_ROLE_SUFFIX)
+
+
+def format_headcount(channel_name, time_text, total, groups, unassigned) -> str:
+    """/인원현황 메시지 — 숫자만 (명단 없음). 혈맹 구분을 안 쓰면 groups=None.
+    '🎙️ 보탐방 인원현황 · 21:30' / '총 12명' / '⚔️ 정도 5 · 🦸 슈퍼맨 4 · … · ❔ 미지정 2'"""
+    lines = [f"🎙️ **{channel_name}** 인원현황 · {time_text}", f"총 **{total}명**"]
+    if groups is not None:
+        parts = [f"{(emoji + ' ') if emoji else ''}{name} {len(members)}" for name, emoji, members in groups]
+        if unassigned:
+            parts.append(f"{UNASSIGNED_LABEL} {len(unassigned)}")
+        if parts:
+            lines.append(" · ".join(parts))
+    return "\n".join(lines)
+
+
 FIELD_LIMIT = 1024   # 디스코드 embed 필드 값 최대 길이
 
 

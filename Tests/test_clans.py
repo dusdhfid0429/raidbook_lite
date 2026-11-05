@@ -116,6 +116,18 @@ def test_group_by_uid_with_labels():
     assert unassigned == ["손님"]
 
 
+def test_headcount():
+    assert rbc.is_staff_role("운영진") and rbc.is_staff_role("슈퍼맨운영진") and rbc.is_staff_role("썰자운영진 ")
+    assert not rbc.is_staff_role("정도") and not rbc.is_staff_role("운영진후보") and not rbc.is_staff_role(None)
+    roles = {"1": {"정도"}, "2": {"정도"}, "3": {"슈퍼맨"}, "4": set()}
+    groups, unassigned = rbc.group_by_clan(list(roles), TWO, roles.get)
+    assert rbc.format_headcount("보탐방", "21:30", 4, groups, unassigned) == (
+        "🎙️ **보탐방** 인원현황 · 21:30\n총 **4명**\n⚔️ 정도 2 · 🦸 슈퍼맨 1 · ❔ 미지정 1")
+    groups, unassigned = rbc.group_by_clan(["1"], TWO, roles.get)
+    assert rbc.format_headcount("A", "09:00", 1, groups, unassigned).endswith("⚔️ 정도 1 · 🦸 슈퍼맨 0")
+    assert rbc.format_headcount("A", "09:00", 0, None, []) == "🎙️ **A** 인원현황 · 09:00\n총 **0명**"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):
