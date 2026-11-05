@@ -7,7 +7,7 @@ from datetime import datetime
 # 버전 정보
 VERSION_MAJOR = 1
 VERSION_MINOR = 0
-VERSION_PATCH = 39
+VERSION_PATCH = 40
 VERSION_BUILD = 1
 
 # 버전 문자열
@@ -16,7 +16,7 @@ VERSION_FULL = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}.{VERSION_BUILD}
 
 # 릴리즈 정보
 RELEASE_DATE = "2026-11-05"
-RELEASE_NAME = "Lite - 보스 알림 문구 리젠→젠, /전투지원(팝업·전투알림·뮤직봇 대화방 음성 안내·전투종료), 혈맹 분류 UID 기반, 뮤직봇 사용중 안내·보스봇 재생 제외"
+RELEASE_NAME = "Lite - Watchdog 설정 저장 후 디스코드 봇(패널) 무응답 수정"
 RELEASE_CHANNEL = "stable"  # stable, beta, alpha
 
 # 제품 정보
