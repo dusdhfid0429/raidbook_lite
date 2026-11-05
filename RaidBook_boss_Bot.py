@@ -35,6 +35,7 @@ from RaidBook_images import normalized_image_file_args, parse_canvas_size
 import RaidBook_schedule as rb_schedule
 import RaidBook_attendance as rb_att
 import RaidBook_clans as rb_clans
+import RaidBook_clan_settle as rb_cs
 import RaidBook_combat_support as rb_combat
 import RaidBook_broadcast as rb_broadcast
 from RaidBook_boss_data import (
@@ -59,6 +60,7 @@ from RaidBook_boss_auction import (
     pending_status,
     board_results_text,
     lots_results_text,
+    lot_label,
     merge_board_lots,
     parse_board_defaults,
 )
@@ -2024,6 +2026,77 @@ async def _apply_board_results(board):
     log.info(f"[진행판 결과 반영] {boss_name} {boss_time} {mid} | {results[:120]}")
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  💰 정산 — 보탐 경매건별 혈맹 분배 (RaidBook_clan_settle)
+#  그 보탐에서 낙찰된 금액 합계 ÷ 전체 참석자 × 혈맹별 참석자. 유찰 재경매로 팔리면 다시 누를 때 반영.
+#  권한: 역할 이름이 '운영진'으로 끝나는 사람 (+ 서버 소유자·관리 권한자) — /인원현황과 같은 기준
+# ══════════════════════════════════════════════════════════════════════════
+CLAN_SETTLE = rb_cs.ClanSettleStore(os.path.join(DATA_DIR, "clan_settlements.json"), log)
+_clan_settle_lock = asyncio.Lock()
+
+
+async def recompute_clan_settlement(mid):
+    """보탐 알림 하나의 혈맹별 정산을 다시 계산해 저장. 반환: (기록, 오류문)."""
+    mid = str(mid)
+    async with _clan_settle_lock:
+        boards = boss_auction.boards_for_source(mid)
+        merged = merge_board_lots(boards)   # 재경매로 진행판이 여러 개면 아이템별 최신 결과
+        sold = [x for x in merged if x.get("status") == "closed" and x.get("bidder_id")]
+        unsold = [lot_label(x) for x in merged if not (x.get("status") == "closed" and x.get("bidder_id"))]
+        if not sold:
+            return None, "아직 낙찰된 아이템이 없어요. 낙찰되면 다시 눌러 주세요."
+        try:
+            raw = await asyncio.to_thread(_boss_attendees_for, mid)
+        except Exception as e:
+            return None, f"참석자 조회에 실패했어요 ({type(e).__name__})."
+        attendees = []
+        for u in raw or []:
+            if str(u) not in attendees:
+                attendees.append(str(u))
+        id_to_name = _load_id_to_name_mapping()
+        lots = [{"label": lot_label(x), "winner_uid": str(x.get("bidder_id")), "winner_name": x.get("bidder_name", ""),
+                 "price": int(x.get("current_price") or 0)} for x in sold]
+        try:
+            groups = rb_cs.clan_groups_from_split(_clan_split_ids(attendees),
+                                                  [id_to_name.get(u, u) for u in attendees])
+            rec = rb_cs.compute(lots, len(attendees), groups)
+        except ValueError as e:
+            return None, str(e)
+        try:
+            when = discord.utils.snowflake_time(int(mid)).astimezone()
+        except Exception:
+            when = None
+        first = boards[0] if boards else {}
+        rec.update({"boss_name": first.get("boss_name", ""), "boss_time": first.get("boss_time", ""),
+                    "boss_date": when.strftime("%m/%d") if when else "", "lots": lots, "unsold": unsold,
+                    "attendee_ids": attendees})
+        rec = CLAN_SETTLE.save(mid, rec)
+    log.info(f"[정산] {rec['boss_name']} {rec['boss_time']} {mid} | 합계 {rec['total']:,} ÷ {rec['attendee_count']}명 "
+             f"= {rec['per']:,} | " + " ".join(f"{c['name']}{c['count']}={c['amount']:,}" for c in rec["clans"]))
+    return rec, None
+
+
+async def show_clan_settlement(interaction: discord.Interaction, source_mid):
+    """💰 정산 버튼 공통 — 권한 확인 후 그 보탐의 정산 결과를 누른 사람에게만 보여 준다."""
+    if not _is_headcount_staff(interaction.user):
+        await interaction.response.send_message("⛔ 운영진만 정산을 볼 수 있어요.", ephemeral=True)
+        return
+    if not source_mid:
+        await interaction.response.send_message("⚠️ 이 경매가 어느 보탐에서 나왔는지 몰라 정산할 수 없어요.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    rec, err = await recompute_clan_settlement(source_mid)
+    if err:
+        await interaction.followup.send(f"⚠️ {err}", ephemeral=True)
+        return
+    clan_names = [name for name, _ in CLAN_ROLES]
+    viewer = rb_cs.viewer_clan([r.name for r in getattr(interaction.user, "roles", [])], clan_names)
+    text = rb_cs.detail_text(rec, AUCTION_CURRENCY, viewer=viewer,
+                             short=lambda p: rb_clans.short_name(p, tuple(clan_names)))
+    await interaction.followup.send(text, ephemeral=True)
+    log.info(f"[정산 조회] {getattr(interaction.user, 'display_name', interaction.user)} | {source_mid}")
+
+
 class AttendView(ui.View):
     def __init__(self, message_id=None, boss_name=None, boss_time=None, created_date=None, loot=None, expired=False, disable_time=None,
                  persistent=False):
@@ -2057,6 +2130,11 @@ class AttendView(ui.View):
         self.confirmed_attendees: list = []
         self.confirmed_at: str = ""
         self.confirm_dt = None  # 자동 확정 예정 시각 (카운트다운용)
+        if not LOOT_AUCTION_BUTTON:   # 경매를 안 쓰면 💰 정산도 없음
+            for child in list(self.children):
+                if getattr(child, "custom_id", None) == "boss_clan_settle":
+                    self.remove_item(child)
+                    self._attendee_edit_items.remove(child)
         if HIDE_ATTEND_BUTTONS:
             for child in list(self.children):
                 if getattr(child, "custom_id", None) in ("boss_join", "boss_cancel"):
@@ -2491,6 +2569,11 @@ class AttendView(ui.View):
     @ui.button(label="인원 제거", emoji="➖", style=discord.ButtonStyle.secondary, custom_id="boss_attendee_remove")
     async def attendee_remove_button(self, interaction: discord.Interaction, button: ui.Button):
         await self._open_attendee_picker(interaction, "remove")
+
+    @ui.button(label="정산", emoji="💰", style=discord.ButtonStyle.success, custom_id="boss_clan_settle")
+    async def clan_settle_button(self, interaction: discord.Interaction, button: ui.Button):
+        """💰 정산 — 이 보탐 경매건의 혈맹별 정산 결과 (운영진, 본인만 보임). 누를 때마다 최신 낙찰금으로 다시 계산."""
+        await show_clan_settlement(interaction, interaction.message.id)
 
     def _is_loot_attendee(self, user):
         uid = str(user.id)
@@ -3680,6 +3763,7 @@ boss_auction = BossAuction(bot, channel_id=AUCTION_CHANNEL_ID, data_dir=DATA_DIR
                            is_admin=_is_bot_admin, logger=log, currency=AUCTION_CURRENCY,
                            get_attendees=_boss_attendees_for)
 boss_auction.on_board_finished = _apply_board_results
+boss_auction.on_settle = show_clan_settlement   # 진행판 💰 정산도 같은 혈맹별 정산으로
 boss_auction.on_change = lambda: schedule_pending_refresh()
 boss_auction.board_defaults = dict(AUCTION_DEFAULTS)
 boss_auction.get_names = lambda: _load_id_to_name_mapping()
@@ -4533,7 +4617,7 @@ class _AttendeeEditView(discord.ui.View):
         self.stop()
 
 
-ATTENDEE_EDIT_BUTTON_IDS = ("boss_attendee_add", "boss_attendee_remove")
+ATTENDEE_EDIT_BUTTON_IDS = ("boss_attendee_add", "boss_attendee_remove", "boss_clan_settle")
 _PICK_PAGE = 25  # Discord 선택 메뉴 한 번에 최대 25개
 
 

@@ -298,6 +298,7 @@ class BossAuction:
         self.clock_offset = 0.0   # PC 시계 − Discord 시계 (초)
         # 경매 진행판 전체 종료 콜백 async (board) -> None (보스 알림에 결과 반영)
         self.on_board_finished = None
+        self.on_settle = None   # async (interaction, 보탐 알림ID) — 있으면 💰 정산을 여기로 (혈맹별 정산)
         # 진행판 생성·아이템 마감 등 경매 대기 목록이 바뀔 때 호출 (동기 콜백, 예약만 해야 함)
         self.on_change = None
         self.board_defaults = dict(DEFAULT_BOARD_DEFAULTS)   # 재경매 입력에서 숫자 생략 시
@@ -1264,7 +1265,7 @@ def board_usage_text(board, state, lot=None):
     if board_unsold_lots(board):
         lines.append("· 🔁 **유찰 재경매** (관리자) — 유찰·취소된 아이템만 새 경매로 다시 올려요")
     if board_can_settle(board):
-        lines.append("· 💰 **정산** (관리자) — 낙찰금을 혈비·참석자 몫으로 나눠 계산해요")
+        lines.append("· 💰 **정산** (운영진) — 이 보탐 낙찰금을 참석자 수로 나눠 혈맹별 금액을 보여 줘요")
     return "\n".join(lines)
 
 
@@ -1783,8 +1784,13 @@ class BoardView(ui.View):
 
     @ui.button(label="정산", emoji="💰", style=discord.ButtonStyle.success, custom_id="boss_board_settle")
     async def settle_btn(self, interaction: discord.Interaction, button: ui.Button):
-        """낙찰된 진행판의 낙찰금을 정산 비율대로 나눠 정산 데이터를 만든다 (관리자, 결과는 본인만 보이게)."""
+        """낙찰된 진행판의 낙찰금을 정산 비율대로 나눠 정산 데이터를 만든다 (관리자, 결과는 본인만 보이게).
+        on_settle이 있으면 그 보탐의 혈맹별 정산을 보여 준다 (권한 확인도 그쪽에서)."""
         a = self.auction
+        if a.on_settle is not None:
+            board = a.store.get(interaction.message.id) or {}
+            await a.on_settle(interaction, board.get("source_message_id"))
+            return
         if not a.is_admin(interaction.user):
             await interaction.response.send_message("⛔ 관리자만 정산할 수 있어요.", ephemeral=True)
             return
