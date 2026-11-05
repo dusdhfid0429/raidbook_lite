@@ -2849,9 +2849,9 @@ def _join_guide_text():
 
 
 def _embed_line_boss_time(line):
-    """알림 embed 한 줄에서 리젠 시각(HH:MM)을 꺼낸다. 새 형식 '⏰ 리젠 03:00 · 🔒 마감 …'과
-    예전 형식 '⏰ 보스 리젠 시각: **03:00**' 모두 읽는다."""
-    m = re.search(r"(?:리젠 시각: \*\*|⏰ 리젠 )(\d{1,2}:\d{2})", line or "")
+    """알림 embed 한 줄에서 젠 시각(HH:MM)을 꺼낸다. 새 형식 '⏰ 젠 03:00 · 🔒 마감 …'과
+    예전 형식 '⏰ 리젠 03:00 …' / '⏰ 보스 리젠 시각: **03:00**' 모두 읽는다."""
+    m = re.search(r"(?:리젠 시각: \*\*|⏰ (?:리)?젠 )(\d{1,2}:\d{2})", line or "")
     return m.group(1) if m else ""
 
 
@@ -2921,7 +2921,7 @@ def make_attend_embed(boss_name, count, names, boss_time=None, expired=False, lo
     # 폰 푸시 미리보기는 마크다운/<t:> 타임스탬프를 원문 그대로 보여 주므로 시각은 평문으로 쓰고,
     # 남은 시간(<t:R>)은 미리보기에 안 나오는 필드로 뺀다
     deadline_ts = None
-    time_line = f"⏰ 리젠 {boss_time}" if boss_time else ""
+    time_line = f"⏰ 젠 {boss_time}" if boss_time else ""
     closed_at = ""
     if expired:
         status = ""
@@ -3040,9 +3040,9 @@ def _next_boss_time(boss_name, boss_time):
 def _boss_alert_content(boss_name, boss_time=None, *, expired=False):
     if expired:
         next_time = _next_boss_time(boss_name, boss_time)
-        return f"📢 {boss_name} 보스 마감" + (f" | 다음 리젠 {next_time}" if next_time else "")
+        return f"📢 {boss_name} 보스 마감" + (f" | 다음 젠 {next_time}" if next_time else "")
     status = "알림"
-    time_part = f" | 리젠 {boss_time}" if boss_time else ""
+    time_part = f" | 젠 {boss_time}" if boss_time else ""
     return f"📢 {boss_name} 보스 {status}{time_part}"
 
 
