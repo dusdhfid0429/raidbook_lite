@@ -99,9 +99,8 @@ def test_embed_with_and_without_clans():
         return rbc.group_by_clan(ids, CLANS[:2], lambda u: roles[u], label_of=lambda u: names[u])
 
     e = cs.build_embed(rec, names, split)
-    assert e.title == "⚔️ 축순 3번 기사단"
-    assert "🙋 요청 투신 (⚔️ 정도) · 14:05" in e.description
-    assert "👉 <#100>" in e.description
+    assert e.title == "⚔️ 전투지원 요청"
+    assert e.description.startswith("📌 축순 3번 기사단\n🙋 투신 (⚔️ 정도) · 14:05  👉 <#100>")
     assert "✅ 현재 참석: 총 3명" in e.description
     fields = {f.name: f.value for f in e.fields}
     assert fields["⚔️ 정도 1명"] == "투신"
@@ -111,9 +110,16 @@ def test_embed_with_and_without_clans():
     rec2 = dict(rec, clan="", clan_emoji="", combat_room_id=None, attendees=[])
     e2 = cs.build_embed(rec2, names, None)
     assert "👉" not in e2.description
-    assert "🙋 요청 투신 · 14:05" in e2.description
+    assert "🙋 투신 · 14:05" in e2.description
     assert "✅ 현재 참석: 0명 | 없음" in e2.description
     assert cs.push_text(rec) == "⚔️ 전투지원 요청: 축순 3번 기사단"
+
+    ended = dict(rec, ended_at="2026-11-05T15:00:00", ended_time="15:00")
+    e3 = cs.build_embed(ended, names, split)
+    assert e3.title == "⚔️ 전투지원 요청 (종료)"
+    assert "🔒 전투종료 15:00" in e3.description and "✅ 최종 참석: 총 3명" in e3.description
+    assert e3.color.value == 0x888888
+    assert cs.push_text(ended) == "⚔️ 전투지원 요청 (종료): 축순 3번 기사단"
 
 
 def test_announce_sends_one_speak_per_clan_room():
@@ -188,6 +194,34 @@ def test_announce_prefers_music_bots_then_falls_back():
         assert [c for _, c, _ in sent] == ["speak", "speak", "speak"]
     finally:
         cs.send_ipc = orig
+
+
+
+def test_view_buttons_and_end_permission():
+    async def run():
+        obj = cs.CombatSupport(None, {}, CLANS, tempfile.gettempdir(), is_admin=lambda m: m.id == 1,
+                               clan_split_ids=lambda ids: None, id_to_name=dict,
+                               update_user_mapping=lambda u, n: None)
+        live = {c.custom_id: c.disabled for c in cs.CombatView(obj).children}
+        assert live == {cs.BTN_VOICECHECK: False, cs.BTN_ADD: False, cs.BTN_REMOVE: False, cs.BTN_END: False}
+        done = {c.custom_id: c.disabled for c in cs.CombatView(obj, ended=True).children}
+        assert done == {cs.BTN_VOICECHECK: True, cs.BTN_ADD: False, cs.BTN_REMOVE: False, cs.BTN_END: True}
+
+        class U:
+            def __init__(self, i):
+                self.id = i
+        rec = {"requester_id": "5"}
+        assert obj.can_end(U(1), rec) and obj.can_end(U(5), rec) and not obj.can_end(U(7), rec)
+    asyncio.run(run())
+
+
+def test_store_update():
+    with tempfile.TemporaryDirectory() as d:
+        st = cs.Store(os.path.join(d, "c.json"))
+        st.put(1, {"created_at": "x", "attendees": []})
+        rec = st.update(1, lambda r: r.setdefault("ended_at", "t"))
+        assert rec["ended_at"] == "t" and st.get(1)["ended_at"] == "t"
+        assert st.update(2, lambda r: None) is None
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """⚔️ 전투지원 요청 — /전투지원 → 내용 팝업(15자) → 전투알림 채널에 등록 + 혈맹 대화방 TTS 안내.
 
-등록된 알림에는 요청자 혈맹(연합)의 전투방 바로가기 링크, 참석자(혈맹별), 인원체크·➕ 인원 추가·➖ 인원 제거 버튼.
+등록된 알림에는 요청자 혈맹(연합)의 전투방 바로가기 링크, 참석자(혈맹별), 인원체크·➕ 인원 추가·➖ 인원 제거·⏹️ 전투종료 버튼.
 채널 ID는 전부 boss_config.json에서 고친다:
   combat_alert_channel_id               전투알림 채널 (비면 'RaidBook' 카테고리에 '전투-알림' 자동 생성)
   combat_support.tts_channel_ids                       TTS로 요청을 읽어 줄 대화방(음성채널) ID 목록 — 적힌 개수만큼 차례로 읽음
@@ -32,6 +32,7 @@ PICK_PAGE = 25              # 디스코드 선택 메뉴 최대 항목 수
 BTN_VOICECHECK = "combat_voicecheck"
 BTN_ADD = "combat_attendee_add"
 BTN_REMOVE = "combat_attendee_remove"
+BTN_END = "combat_end"
 
 
 # ── 설정 (순수 로직) ─────────────────────────────────────────────────────
@@ -198,6 +199,17 @@ class Store:
                     data.pop(k, None)
             write_json_atomic(self.path, data, self.log)
 
+    def update(self, message_id, fn):
+        """fn(기록) 으로 기록을 고친다 (제자리 수정). 반환: 기록 / 없음 None."""
+        with self._lock:
+            data = self.load()
+            rec = data.get(str(message_id))
+            if rec is None:
+                return None
+            fn(rec)
+            write_json_atomic(self.path, data, self.log)
+            return rec
+
     def update_attendees(self, message_id, fn):
         """fn(참석자 목록) → 새 목록. 반환: (기록, 바뀌었는지) / 기록 없음 (None, False)."""
         with self._lock:
@@ -224,17 +236,23 @@ def merge_attendees(current, add=(), remove=()) -> list:
 
 # ── 화면 ────────────────────────────────────────────────────────────────
 def build_embed(rec, names, clan_split=None):
-    """rec: 저장 기록, names: {uid: 이름}, clan_split: 참석자 UID → (groups, unassigned) 또는 None."""
-    content = rec.get("content", "")
-    embed = discord.Embed(color=0xE53935, title=f"⚔️ {content}")
+    """rec: 저장 기록, names: {uid: 이름}, clan_split: 참석자 UID → (groups, unassigned) 또는 None.
+    B안 (동훈님 선택 2026-11-05): 제목 고정, 내용은 📌 줄. 전투종료 후엔 회색 + 🔒 종료 시각 + 최종 참석."""
+    ended = bool(rec.get("ended_at"))
+    embed = discord.Embed(color=0x888888 if ended else 0xE53935,
+                          title="⚔️ 전투지원 요청" + (" (종료)" if ended else ""))
     clan = rec.get("clan") or ""
     who = rec.get("requester_name", "")
     if clan:
         who += f" ({(rec.get('clan_emoji') or '') + ' ' if rec.get('clan_emoji') else ''}{clan})"
-    lines = [f"🙋 요청 {who} · {rec.get('time', '')}"]
+    line = f"🙋 {who} · {rec.get('time', '')}"
     room = rec.get("combat_room_id")
     if room:
-        lines.append(f"👉 <#{room}>")
+        line += f"  👉 <#{room}>"
+    lines = [f"📌 {rec.get('content', '')}", line]
+    if ended:
+        lines.append(f"🔒 전투종료 {rec.get('ended_time', '')}".rstrip())
+    prefix = "✅ 최종 참석" if ended else "✅ 현재 참석"
     attendees = [str(u) for u in rec.get("attendees") or []]
     split = None
     if clan_split is not None:
@@ -243,20 +261,20 @@ def build_embed(rec, names, clan_split=None):
         except Exception:
             split = None
     if split:
-        lines.append(f"\n✅ 현재 참석: 총 {len(attendees)}명")
+        lines.append(f"\n{prefix}: 총 {len(attendees)}명")
         embed.description = "\n".join(lines)
         for fname, fval in rb_clans.clan_fields(*split):
             embed.add_field(name=fname, value=fval, inline=False)
     else:
         people = " · ".join(names.get(u, u) for u in attendees) or "없음"
-        lines.append(f"\n✅ 현재 참석: {len(attendees)}명 | {people}")
+        lines.append(f"\n{prefix}: {len(attendees)}명 | {people}")
         embed.description = "\n".join(lines)[:4000]
     return embed
 
 
 def push_text(rec) -> str:
     """폰 푸시 미리보기용 평문 (마크다운·채널 링크 없이)."""
-    return f"⚔️ 전투지원 요청: {rec.get('content', '')}"
+    return f"⚔️ 전투지원 요청{' (종료)' if rec.get('ended_at') else ''}: {rec.get('content', '')}"
 
 
 # ── 디스코드 ─────────────────────────────────────────────────────────────
@@ -370,7 +388,8 @@ class CombatSupport:
 
     async def redraw(self, message, rec):
         try:
-            await message.edit(content=push_text(rec), embed=self._embed(rec), view=CombatView(self))
+            await message.edit(content=push_text(rec), embed=self._embed(rec),
+                               view=CombatView(self, ended=bool(rec.get("ended_at"))))
         except Exception as e:
             self._info(f"[전투지원] 화면 갱신 실패 {getattr(message, 'id', '')}: {type(e).__name__}: {e}")
 
@@ -393,6 +412,8 @@ class CombatSupport:
             rec = self.store.get(message.id)
             if rec is None:
                 return "⚠️ 이 알림의 기록을 찾을 수 없어요."
+            if rec.get("ended_at"):
+                return "🔒 이미 전투종료된 알림이에요. 빠진 사람은 ➕ 인원 추가로 넣어 주세요."
             channels = self._voice_channels(message.guild, rec)
             if not channels:
                 return "⚠️ 전투방 채널 ID가 아직 설정되지 않았어요 (boss_config.json의 combat_support)."
@@ -409,6 +430,34 @@ class CombatSupport:
             self._info(f"[전투지원 인원체크] msg:{message.id} | 음성 {len(found)}명, 신규 {total - before}명, 총 {total}명")
             await self.redraw(message, rec)
             return total - before, total
+
+    async def end(self, message, user):
+        """⏹️ 전투종료 — 마지막으로 전투방 인원체크를 한 번 하고 종료 표시 (인원체크·전투종료 버튼 꺼짐, ➕/➖는 그대로).
+        반환: 기록 / 문자열=안내."""
+        rec = self.store.get(message.id)
+        if rec is None:
+            return "⚠️ 이 알림의 기록을 찾을 수 없어요."
+        if rec.get("ended_at"):
+            return "🔒 이미 전투종료된 알림이에요."
+        try:
+            await self.voice_check(message)   # 종료 직전 전투방 인원 담기 (채널 미설정이면 건너뜀)
+        except Exception as e:
+            self._info(f"[전투종료 전 인원체크 실패] {message.id}: {type(e).__name__}: {e}")
+        async with self._locks[message.id]:
+            now = datetime.now()
+
+            def _mark(r):
+                r.setdefault("ended_at", now.isoformat(timespec="seconds"))
+                r.setdefault("ended_time", now.strftime("%H:%M"))
+                r.setdefault("ended_by", str(user.id))
+            rec = self.store.update(message.id, _mark)
+            await self.redraw(message, rec)
+        self._info(f"[전투종료] msg:{message.id} user:{user.id} | 최종 {len(rec.get('attendees') or [])}명")
+        return rec
+
+    def can_end(self, user, rec) -> bool:
+        """전투종료: 운영진 또는 요청한 사람."""
+        return self.is_admin(user) or str(getattr(user, "id", "")) == str((rec or {}).get("requester_id"))
 
     async def edit_attendees(self, message, add=(), remove=()):
         async with self._locks[message.id]:
@@ -447,9 +496,12 @@ class CombatModal(ui.Modal, title="⚔️ 전투지원 요청"):
 class CombatView(ui.View):
     """등록된 전투지원 알림 버튼 — custom_id 고정이라 재시작 후에도 동작."""
 
-    def __init__(self, cs: CombatSupport):
+    def __init__(self, cs: CombatSupport, ended=False):
         super().__init__(timeout=None)
         self.cs = cs
+        for child in self.children:
+            if getattr(child, "custom_id", None) in (BTN_VOICECHECK, BTN_END):
+                child.disabled = bool(ended)
 
     async def _admin_only(self, interaction, what):
         if self.cs.is_admin(interaction.user):
@@ -494,6 +546,26 @@ class CombatView(ui.View):
             return
         await interaction.followup.send("➖ 제거할 참석자를 고르세요.",
                                         view=_RemovePicker(self.cs, interaction.message, rec), ephemeral=True)
+
+
+    @ui.button(label="전투종료", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id=BTN_END)
+    async def end_button(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        rec = self.cs.store.get(interaction.message.id)
+        if not self.cs.can_end(interaction.user, rec):
+            await interaction.followup.send("⛔ 전투종료는 운영진이나 요청한 사람만 할 수 있어요.", ephemeral=True)
+            return
+        try:
+            result = await self.cs.end(interaction.message, interaction.user)
+        except Exception as e:
+            self.cs._info(f"[전투종료 실패] {interaction.message.id}: {type(e).__name__}: {e}")
+            result = "⚠️ 전투종료 중 오류가 발생했어요."
+        if isinstance(result, str):
+            text = result
+        else:
+            text = (f"⏹️ 전투종료 — 최종 참석 {len(result.get('attendees') or [])}명"
+                    f"{self.cs.clan_summary(result)}")
+        await interaction.followup.send(text, ephemeral=True)
 
 
 class _AddPicker(ui.View):
