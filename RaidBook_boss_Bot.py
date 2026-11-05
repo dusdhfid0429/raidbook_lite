@@ -36,6 +36,7 @@ import RaidBook_schedule as rb_schedule
 import RaidBook_attendance as rb_att
 import RaidBook_clans as rb_clans
 import RaidBook_combat_support as rb_combat
+import RaidBook_broadcast as rb_broadcast
 from RaidBook_boss_data import (
     ensure_loot_sheet as _ensure_loot_sheet_core,
     load_all_loot as _load_all_loot_core,
@@ -331,6 +332,7 @@ CLAN_ROLES = rb_clans.parse_clan_roles(config.get("clan_roles"))
 # ⚔️ /전투지원 — 채널 ID 자리(combat_alert_channel_id, combat_support)를 설정 파일에 만들어 두고,
 # 동훈님이 정한 채널(2026-11-05)은 예전 설치판에 한 번만 넣는다 (이후 운영진이 고친 값은 그대로)
 _combat_changed = rb_combat.ensure_section(config, CLAN_ROLES)
+_combat_changed = rb_broadcast.ensure_section(config) or _combat_changed   # 📢 /전파 설정 자리
 if not config.get("_combat_channels_applied"):
     rb_combat.apply_initial_channels(config)
     config["_combat_channels_applied"] = True
@@ -338,7 +340,7 @@ if not config.get("_combat_channels_applied"):
 if _combat_changed:
     try:
         write_json_atomic(CONFIG_PATH, config, log)
-        log.info("[설정] boss_config.json에 전투지원(combat_support) 설정을 추가했어요")
+        log.info("[설정] boss_config.json에 전투지원(combat_support)·전파(broadcast) 설정을 추가했어요")
     except Exception as e:
         log.info(f"[설정] 전투지원 설정 저장 실패 (이번 실행만 적용): {e}")
 # 구버전 방식: 전리품 공지 메시지의 🔨 경매시작 버튼 → 세팅 입력 → ▶️ 시작 (기본 꺼짐)
@@ -3729,6 +3731,44 @@ async def cmd_combat_support(interaction: discord.Interaction):
         return
     log.info(f"[명령어] /전투지원 | 사용자: {getattr(interaction.user, 'display_name', interaction.user)}")
     await interaction.response.send_modal(rb_combat.CombatModal(combat_support))
+
+
+@bot.tree.command(name="전파", description="운영진 전용 — 적은 내용을 혈맹 대화방 전체에 음성으로 전달해요")
+@discord.app_commands.describe(내용="대화방에 읽어 줄 내용")
+async def cmd_broadcast(interaction: discord.Interaction, 내용: str):
+    bs = rb_broadcast.Settings(config)
+    user = interaction.user
+    name = getattr(user, "display_name", None) or user.name
+    log.info(f"[명령어] /전파 | 사용자: {name} | 내용: {내용}")
+    if not bs.enabled:
+        await interaction.response.send_message("전파 기능이 꺼져 있어요.", ephemeral=True)
+        return
+    if not bs.channel_allowed(interaction.channel_id):
+        where = " ".join(f"<#{c}>" for c in bs.channel_ids)
+        await interaction.response.send_message(f"/전파는 {where} 채널에서만 쓸 수 있어요.", ephemeral=True)
+        return
+    if not bs.can_use(r.name for r in getattr(user, "roles", []) or []):
+        await interaction.response.send_message(
+            f"/전파는 '{bs.role_suffix}'(으)로 끝나는 역할이 있는 사람만 쓸 수 있어요.", ephemeral=True)
+        return
+    content = bs.clean(내용)
+    if not content:
+        await interaction.response.send_message("내용을 적어 주세요.", ephemeral=True)
+        return
+    text = rb_broadcast.post_text(name, content)
+    await interaction.response.send_message(text + "\n-# 🔊 대화방에 전달 중…")
+    speech = bs.speech(content, rb_broadcast.spoken_name(name, [c for c, _ in CLAN_ROLES]))
+    total = len(combat_support.settings.tts_channels())
+    try:
+        spoken = await combat_support.speak(speech, tag="전파")
+    except Exception as e:
+        log.info(f"[전파] 음성 전달 오류: {type(e).__name__}: {e}")
+        spoken = 0
+    log.info(f"[전파] '{speech}' → 대화방 {spoken}/{total}")
+    try:
+        await interaction.edit_original_response(content=text + "\n" + rb_broadcast.result_line(spoken, total))
+    except Exception as e:
+        log.info(f"[전파] 결과 표시 실패: {type(e).__name__}: {e}")
 
 
 @bot.check

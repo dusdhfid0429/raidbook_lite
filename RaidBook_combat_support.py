@@ -354,10 +354,17 @@ class CombatSupport:
         """설정된 대화방에 음성으로 요청을 읽어 준다. 반환: 안내를 보낸 대화방 수.
         1) 음악봇(뮤직봇들이 대화방마다 하나씩 동시에, 재생 중이면 재생 종료 후) 2) 안 되면 TTS 봇(한 곳씩 차례로)."""
         s = self.settings
-        channels = s.tts_channels()
-        if not s.tts or not channels:
+        if not s.tts:
             return 0
         text = s.tts_text(rec.get("content", ""), rec.get("clan", ""), rec.get("requester_name", ""))
+        return await self.speak(text, tag="전투지원")
+
+    async def speak(self, text, tag="전투지원") -> int:
+        """설정된 대화방(tts_channel_ids)에 text를 음성으로 읽는다 (/전파도 같이 씀). 반환: 안내한 대화방 수."""
+        s = self.settings
+        channels = s.tts_channels()
+        if not channels or not text:
+            return 0
         if s.engine == "music" and self.music_port:
             try:
                 res = await send_ipc(self.music_port, "announce", [text, s.tts_voice, channels],
@@ -366,7 +373,7 @@ class CombatSupport:
                 res = {"ok": False, "error": str(e)}
             if res and res.get("ok"):
                 return int(res.get("channels") or len(channels))
-            self._info(f"[전투지원 음성] 음악봇 안내 실패 → TTS 봇으로: {(res or {}).get('error')}")
+            self._info(f"[{tag} 음성] 음악봇 안내 실패 → TTS 봇으로: {(res or {}).get('error')}")
         if not self.tts_port:
             return 0
         ok = 0
@@ -379,7 +386,7 @@ class CombatSupport:
             if res and res.get("ok"):
                 ok += 1
             else:
-                self._info(f"[전투지원 TTS] {cid} 실패: {(res or {}).get('error')}")
+                self._info(f"[{tag} TTS] {cid} 실패: {(res or {}).get('error')}")
         return ok
 
     # 화면 갱신 -----------------------------------------------------------
