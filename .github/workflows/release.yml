@@ -51,6 +51,7 @@ jobs:
           python Tests/test_music.py
           python Tests/test_tts.py
           python Tests/test_clans.py
+          python Tests/test_clan_settle.py
           python Tests/test_combat_support.py
 
       - name: Install Inno Setup
