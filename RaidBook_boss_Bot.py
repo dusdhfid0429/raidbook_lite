@@ -3663,7 +3663,8 @@ async def on_message(message):
 
 def _is_bot_admin(member) -> bool:
     """명령 사용 권한: 서버 소유자, 서버 관리/관리자 권한, 또는 관리자 역할 보유
-    (config admin_role_ids 의 역할 ID, admin_role_names 의 역할 이름 — 기본 '운영진', '슈퍼맨운영진')."""
+    (config admin_role_ids 의 역할 ID, admin_role_names 의 역할 이름 — 기본 '운영진', '슈퍼맨운영진',
+    그리고 이름이 '운영진'으로 끝나는 각 혈맹 운영진 역할 — 정도운영진·썰자운영진 … 목록에 없어도 허용)."""
     if not isinstance(member, discord.Member):
         return False
     if member.guild is not None and member.id == member.guild.owner_id:
@@ -3671,7 +3672,8 @@ def _is_bot_admin(member) -> bool:
     perms = member.guild_permissions
     if perms.administrator or perms.manage_guild:
         return True
-    return any(r.id in ADMIN_ROLE_IDS or r.name.strip() in ADMIN_ROLE_NAMES for r in member.roles)
+    return any(r.id in ADMIN_ROLE_IDS or r.name.strip() in ADMIN_ROLE_NAMES or rb_clans.is_staff_role(r.name)
+               for r in member.roles)
 
 
 boss_auction = BossAuction(bot, channel_id=AUCTION_CHANNEL_ID, data_dir=DATA_DIR,
