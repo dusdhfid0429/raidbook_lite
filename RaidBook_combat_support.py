@@ -52,6 +52,7 @@ def default_section(clan_roles) -> dict:
         "tts": True,
         "tts_voice": "2",
         "tts_template": "전투지원 요청, {content}",
+        "tts_engine": "music",
         "tts_channel_ids": [],
         "default_combat_room_channel_id": None,
         "clans": {name: {"combat_room_channel_id": None} for name, _ in clan_roles},
@@ -59,7 +60,9 @@ def default_section(clan_roles) -> dict:
 
 
 SECTION_COMMENT = (
-    "/전투지원 설정. tts_channel_ids = TTS로 요청을 읽어 줄 대화방(음성채널) ID 목록 — 적힌 개수만큼 한 곳씩 차례로 읽어요 (1개면 1번, 2개면 2번). "
+    "/전투지원 설정. tts_channel_ids = 요청을 음성으로 읽어 줄 대화방(음성채널) ID 목록 — 적힌 개수만큼 읽어요 (1개면 1번, 2개면 2번). "
+    "tts_engine = music이면 음악봇들이 대화방마다 하나씩 들어가 동시에 읽고(음악 재생 중인 봇은 재생 종료 후 사용, 봇이 모자라면 이어서 읽음), "
+    "음악봇이 꺼져 있으면 TTS 봇이 한 곳씩 차례로 읽어요. tts로 적으면 항상 TTS 봇. "
     "clans.<혈맹 역할 이름>.combat_room_channel_id = 요청자가 그 혈맹이면 알림에 링크할 연합 카테고리의 전투방(음성채널) ID — 같은 연합이면 같은 ID를 넣으면 돼요. "
     "default_combat_room_channel_id = 혈맹 역할이 없는 요청자용 전투방. max_length = 내용 글자 수 제한, "
     "tts_template = 읽을 문장 ({content}=내용, {clan}=요청자 혈맹, {name}=요청자). 채널을 고친 뒤 보스봇을 다시 시작하세요."
@@ -95,6 +98,23 @@ def ensure_section(config, clan_roles) -> bool:
     return changed
 
 
+# 동훈님이 정한 채널 (2026-11-05) — 비어 있는 칸만 채운다
+INITIAL_ALERT_CHANNEL = 1567766439123755028
+INITIAL_COMBAT_ROOM = 1567388527442919586
+INITIAL_TTS_CHANNELS = [1564868379259441222, 1567164976987111494, 1567522000744882227,
+                        1567532312499855400, 1567550786890637505]
+
+
+def apply_initial_channels(config):
+    sec = config.setdefault("combat_support", {})
+    if not _cid(config.get(ALERT_CHANNEL_KEY)):
+        config[ALERT_CHANNEL_KEY] = INITIAL_ALERT_CHANNEL
+    if not _cid(sec.get("default_combat_room_channel_id")):
+        sec["default_combat_room_channel_id"] = INITIAL_COMBAT_ROOM
+    if not [c for c in (sec.get("tts_channel_ids") or []) if _cid(c)]:
+        sec["tts_channel_ids"] = list(INITIAL_TTS_CHANNELS)
+
+
 class Settings:
     def __init__(self, config, clan_roles):
         sec = config.get("combat_support") if isinstance(config.get("combat_support"), dict) else {}
@@ -106,6 +126,7 @@ class Settings:
         self.placeholder = str(sec.get("placeholder") or DEFAULT_PLACEHOLDER)[:100]
         self.tts = bool(sec.get("tts", True))
         self.tts_voice = str(sec.get("tts_voice") or "2")
+        self.engine = str(sec.get("tts_engine") or "music").strip().lower()
         self.tts_template = str(sec.get("tts_template") or "전투지원 요청, {content}")
         self.default_room = _cid(sec.get("default_combat_room_channel_id"))
         self.clan_roles = list(clan_roles)
@@ -243,7 +264,7 @@ class CombatSupport:
     """보스봇이 만들어 붙인다. helpers는 보스봇 함수 (관리자 판정·혈맹 분류·이름표)."""
 
     def __init__(self, bot, config, clan_roles, data_dir, *, is_admin, clan_split_ids, id_to_name,
-                 update_user_mapping, tts_port=0, logger=None):
+                 update_user_mapping, tts_port=0, music_port=0, logger=None):
         self.bot = bot
         self.config = config
         self.settings = Settings(config, clan_roles)
@@ -253,6 +274,7 @@ class CombatSupport:
         self.id_to_name = id_to_name
         self.update_user_mapping = update_user_mapping
         self.tts_port = tts_port
+        self.music_port = music_port
         self.log = logger
         self._locks = defaultdict(asyncio.Lock)
 
@@ -307,17 +329,30 @@ class CombatSupport:
         if not rec["combat_room_id"]:
             note += "\n-# 전투방 채널 ID가 아직 없어 바로가기 링크는 빠졌어요."
         if s.tts and not spoken:
-            note += "\n-# 대화방 TTS 안내는 못 했어요 (tts_channel_ids 미설정 또는 TTS 봇 꺼짐)."
+            note += "\n-# 대화방 음성 안내는 못 했어요 (tts_channel_ids 미설정 또는 음악봇·TTS 봇 꺼짐)."
         await interaction.followup.send(note, ephemeral=True)
 
     async def announce(self, rec) -> int:
-        """설정된 대화방마다 TTS로 요청을 읽어 준다 (TTS 봇이 대기열로 차례대로 돈다). 반환: 보낸 채널 수."""
+        """설정된 대화방에 음성으로 요청을 읽어 준다. 반환: 안내를 보낸 대화방 수.
+        1) 음악봇(뮤직봇들이 대화방마다 하나씩 동시에, 재생 중이면 재생 종료 후) 2) 안 되면 TTS 봇(한 곳씩 차례로)."""
         s = self.settings
-        if not s.tts or not self.tts_port:
+        channels = s.tts_channels()
+        if not s.tts or not channels:
             return 0
         text = s.tts_text(rec.get("content", ""), rec.get("clan", ""), rec.get("requester_name", ""))
+        if s.engine == "music" and self.music_port:
+            try:
+                res = await send_ipc(self.music_port, "announce", [text, s.tts_voice, channels],
+                                     timeout_connect=2, timeout_read=15)
+            except Exception as e:
+                res = {"ok": False, "error": str(e)}
+            if res and res.get("ok"):
+                return int(res.get("channels") or len(channels))
+            self._info(f"[전투지원 음성] 음악봇 안내 실패 → TTS 봇으로: {(res or {}).get('error')}")
+        if not self.tts_port:
+            return 0
         ok = 0
-        for cid in s.tts_channels():
+        for cid in channels:
             try:
                 res = await send_ipc(self.tts_port, "speak", [text, s.tts_voice, cid],
                                      timeout_connect=2, timeout_read=5)

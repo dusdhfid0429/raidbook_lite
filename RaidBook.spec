@@ -42,7 +42,7 @@ build('RaidBook_boss_Bot.py', 'RaidBook_Boss_Bot', [
 build('RaidBook_Music_Bot.py', 'RaidBook_Music_Bot', [
     # _cffi_backend: nacl._sodium이 C 단에서 import해 분석에 안 잡힘 → 빠지면 'PyNaCl library needed' 오류
     'discord', 'discord.ext.commands', 'discord.voice_client', 'nacl', 'nacl.secret', 'nacl.utils', '_cffi_backend', 'davey',
-    'RaidBook_music', 'RaidBook_storage', 'RaidBook_common', 'config_helper',
+    'edge_tts', 'RaidBook_tts', 'RaidBook_music', 'RaidBook_storage', 'RaidBook_common', 'config_helper',
 ], voice=True)
 # TTS 봇 — 음성(PyNaCl·davey·opus) + edge_tts(마이크로소프트 음성 합성, 인터넷 필요). ffmpeg.exe는 음악 봇과 같이 씀
 build('RaidBook_TTS_Bot.py', 'RaidBook_TTS_Bot', [

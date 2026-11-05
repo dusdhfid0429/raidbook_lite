@@ -142,6 +142,54 @@ def test_announce_sends_one_speak_per_clan_room():
         cs.send_ipc = orig
 
 
+def test_initial_channels_fill_only_empty():
+    config = {}
+    cs.ensure_section(config, CLANS)
+    cs.apply_initial_channels(config)
+    s = cs.Settings(config, CLANS)
+    assert s.alert_channel_id == 1567766439123755028
+    assert s.combat_room_for("정도") == 1567388527442919586
+    assert len(s.tts_channels()) == 5
+    config["combat_support"]["tts_channel_ids"] = [1]
+    config[cs.ALERT_CHANNEL_KEY] = 2
+    cs.apply_initial_channels(config)
+    assert config["combat_support"]["tts_channel_ids"] == [1] and config[cs.ALERT_CHANNEL_KEY] == 2
+
+
+def test_announce_prefers_music_bots_then_falls_back():
+    config = {}
+    cs.ensure_section(config, CLANS)
+    config["combat_support"]["tts_channel_ids"] = [11, 22, 33]
+    sent = []
+    music_ok = {"v": True}
+
+    async def fake_ipc(port, cmd, args, **kw):
+        sent.append((port, cmd, args))
+        if cmd == "announce":
+            return {"ok": True, "channels": 3} if music_ok["v"] else {"ok": False, "error": "off"}
+        return {"ok": True}
+
+    orig = cs.send_ipc
+    cs.send_ipc = fake_ipc
+    try:
+        obj = cs.CombatSupport(None, config, CLANS, tempfile.gettempdir(), is_admin=lambda m: True,
+                               clan_split_ids=lambda ids: None, id_to_name=dict,
+                               update_user_mapping=lambda u, n: None, tts_port=7704, music_port=7705)
+        assert asyncio.run(obj.announce({"content": "축순 3번"})) == 3
+        assert sent == [(7705, "announce", ["전투지원 요청, 축순 3번", "2", [11, 22, 33]])]
+        sent.clear()
+        music_ok["v"] = False
+        assert asyncio.run(obj.announce({"content": "축순 3번"})) == 3
+        assert [c for _, c, _ in sent] == ["announce", "speak", "speak", "speak"]
+        sent.clear()
+        config["combat_support"]["tts_engine"] = "tts"
+        obj.reload()
+        asyncio.run(obj.announce({"content": "x"}))
+        assert [c for _, c, _ in sent] == ["speak", "speak", "speak"]
+    finally:
+        cs.send_ipc = orig
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

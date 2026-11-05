@@ -328,13 +328,19 @@ if not config.get("_clan_roles_v2_applied"):
     except Exception as e:
         log.info(f"[설정] 혈맹 역할 추가 저장 실패 (이번 실행만 적용): {e}")
 CLAN_ROLES = rb_clans.parse_clan_roles(config.get("clan_roles"))
-# ⚔️ /전투지원 — 채널 ID 자리(combat_alert_channel_id, combat_support.clans)를 설정 파일에 만들어 둔다
-if rb_combat.ensure_section(config, CLAN_ROLES):
+# ⚔️ /전투지원 — 채널 ID 자리(combat_alert_channel_id, combat_support)를 설정 파일에 만들어 두고,
+# 동훈님이 정한 채널(2026-11-05)은 예전 설치판에 한 번만 넣는다 (이후 운영진이 고친 값은 그대로)
+_combat_changed = rb_combat.ensure_section(config, CLAN_ROLES)
+if not config.get("_combat_channels_applied"):
+    rb_combat.apply_initial_channels(config)
+    config["_combat_channels_applied"] = True
+    _combat_changed = True
+if _combat_changed:
     try:
         write_json_atomic(CONFIG_PATH, config, log)
-        log.info("[설정] boss_config.json에 전투지원(combat_support) 설정 자리를 추가했어요 — 채널 ID를 채워 주세요")
+        log.info("[설정] boss_config.json에 전투지원(combat_support) 설정을 추가했어요")
     except Exception as e:
-        log.info(f"[설정] 전투지원 설정 자리 저장 실패 (이번 실행만 기본값): {e}")
+        log.info(f"[설정] 전투지원 설정 저장 실패 (이번 실행만 적용): {e}")
 # 구버전 방식: 전리품 공지 메시지의 🔨 경매시작 버튼 → 세팅 입력 → ▶️ 시작 (기본 꺼짐)
 LOOT_AUCTION_LEGACY = bool(config.get("loot_auction_legacy", False))
 # 진행판 기본값 "시작가 호가 카운트" (입력 창에 미리 채워짐)
@@ -3701,10 +3707,19 @@ def _tts_port_for_combat():
         return 7704
 
 
+def _music_port_for_combat():
+    """전투지원 음성 안내를 보낼 음악봇 IPC 포트 (music_config.json 의 ipc_port, 없으면 7705)."""
+    try:
+        with open(get_config_path("music_config.json"), encoding="utf-8") as f:
+            return int(json.load(f).get("ipc_port") or 7705)
+    except Exception:
+        return 7705
+
+
 combat_support = rb_combat.CombatSupport(
     bot, config, CLAN_ROLES, DATA_DIR, is_admin=_is_bot_admin, clan_split_ids=lambda ids: _clan_split_ids(ids),
     id_to_name=_load_id_to_name_mapping, update_user_mapping=update_user_mapping,
-    tts_port=_tts_port_for_combat(), logger=log)
+    tts_port=_tts_port_for_combat(), music_port=_music_port_for_combat(), logger=log)
 
 
 @bot.tree.command(name="전투지원", description="전투지원 요청 — 내용을 적으면 전투알림 채널에 올리고 혈맹 대화방에 음성으로 알려요")

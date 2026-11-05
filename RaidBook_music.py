@@ -320,6 +320,46 @@ def pick_bot(candidates, channel_id):
     return None
 
 
+def assign_announce(candidates, channel_ids, can_use=None) -> list:
+    """⚔️ 전투지원 음성 안내 — 대화방마다 음악봇 하나씩 배정 (동시에 읽는다).
+    candidates: [(봇, 들어가 있는 음성채널 ID 또는 None, 재생/대기곡 있음)] (우선순위 순).
+    can_use(봇, 채널ID) → 그 채널 권한이 있는지 (없으면 그 채널엔 배정 안 함).
+    채널마다 1) 이미 그 채널에 있는 봇 2) 음성에 없는 봇 3) 놀고 있는 봇 4) 음악 재생 중인 봇(재생 종료하고 사용).
+    봇보다 대화방이 많으면 남은 대화방은 이미 배정된 봇이 차례로 이어서 읽는다.
+    반환: [(봇, [채널ID…])] — 배정 못 한 채널은 빠진다."""
+    ok = can_use or (lambda b, c: True)
+    plan, used = {}, []
+    order = []
+    rest = []
+    for cid in channel_ids:   # 1) 이미 그 채널에 있는 봇
+        hit = next((b for b, ch, _ in candidates if ch == cid and b not in used and ok(b, cid)), None)
+        if hit is not None:
+            used.append(hit)
+            plan[id(hit)] = (hit, [cid])
+            order.append(id(hit))
+        else:
+            rest.append(cid)
+    late = []
+    for cid in rest:
+        pick = None
+        for rank in (lambda ch, busy: ch is None, lambda ch, busy: not busy, lambda ch, busy: True):
+            pick = next((b for b, ch, busy in candidates
+                         if b not in used and rank(ch, busy) and ok(b, cid)), None)
+            if pick is not None:
+                break
+        if pick is None:
+            late.append(cid)
+            continue
+        used.append(pick)
+        plan[id(pick)] = (pick, [cid])
+        order.append(id(pick))
+    for i, cid in enumerate(late):   # 봇이 모자라면 배정된 봇이 이어서 읽는다
+        able = [k for k in order if ok(plan[k][0], cid)]
+        if able:
+            plan[able[i % len(able)]][1].append(cid)
+    return [plan[k] for k in order]
+
+
 MUSIC_COMMAND_NAMES = frozenset({"재생", "건너뛰기", "일시정지", "정지", "대기열", "현재곡", "삭제", "볼륨"})
 
 _PAYLOAD_KEYS = ("type", "name", "description", "name_localizations", "description_localizations",

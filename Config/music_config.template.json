@@ -22,6 +22,8 @@
   "idle_disconnect_seconds": 300,
   "empty_disconnect_seconds": 60,
   "_empty_disconnect_seconds_comment": "음성채널에 듣는 사람이 없으면 일시정지 후 이 시간(초) 뒤 재생 종료·퇴장. 그 전에 누가 들어오면 이어서 재생",
+  "ipc_port": 7705,
+  "_ipc_port_comment": "보스봇이 ⚔️ 전투지원 음성 안내(대화방마다 음악봇 하나씩, 재생 중이면 재생 종료 후 안내)를 보낼 로컬 포트",
   "auto_update_ytdlp": true,
   "_auto_update_ytdlp_comment": "yt-dlp(유튜브 해석 도구)를 하루 한 번 자동 업데이트 — 유튜브 변경 시 재생 실패 방지"
 }

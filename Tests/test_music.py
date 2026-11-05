@@ -142,6 +142,23 @@ def test_boss_sync_keeps_music_commands():
     assert sorted(server) == sorted(["인원체크", "경매", "재생", "정지"])   # 음악 명령 유지, 지운 보스 명령은 삭제
 
 
+def test_assign_announce_one_bot_per_room():
+    bots = [("A", None, False), ("B", 5, True), ("C", 3, False), ("D", None, False), ("E", 9, False)]
+    # 이미 그 방에 있는 봇(C→3, B→5, 재생 중이어도) → 음성에 없는 봇 → 놀고 있는 봇
+    plan = rbm.assign_announce(bots, [1, 2, 3, 4, 5])
+    assert sorted((b, cs) for b, cs in plan) == [("A", [1]), ("B", [5]), ("C", [3]), ("D", [2]), ("E", [4])]
+    # 놀고 있는 봇이 없으면 음악 재생 중인 봇도 쓴다 (재생 종료 후 안내)
+    plan = rbm.assign_announce([("A", 7, True), ("B", 8, True)], [1, 2])
+    assert sorted(plan) == [("A", [1]), ("B", [2])]
+    # 봇보다 방이 많으면 배정된 봇이 이어서 읽는다
+    plan = rbm.assign_announce([("A", None, False), ("B", None, False)], [1, 2, 3, 4, 5])
+    assert dict(plan) == {"A": [1, 3, 5], "B": [2, 4]}
+    # 권한 없는 방에는 배정하지 않음
+    plan = rbm.assign_announce([("A", None, False), ("B", None, False)], [1, 2], can_use=lambda b, c: b == "A")
+    assert dict(plan) == {"A": [1, 2]}
+    assert rbm.assign_announce([], [1]) == []
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

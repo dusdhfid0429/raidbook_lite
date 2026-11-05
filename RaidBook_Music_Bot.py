@@ -969,9 +969,132 @@ async def _update_loop():
 _ready_once = False
 
 
+# ── ⚔️ 전투지원 음성 안내 (보스봇 IPC: {"cmd":"announce","args":[문장, 목소리, [대화방 ID…]]}) ──────────
+IPC_PORT = int(config.get("ipc_port", 7705) or 7705)
+ANNOUNCE_TMP = os.path.join(_RUNTIME_DIR, "Tools", "announce")
+
+
+async def _announce_clip(text: str, voice: str) -> str:
+    import edge_tts
+    import RaidBook_tts as rbt
+    os.makedirs(ANNOUNCE_TMP, exist_ok=True)
+    path = os.path.join(ANNOUNCE_TMP, f"announce_{time.monotonic_ns()}.mp3")
+    await edge_tts.Communicate(text, rbt.VOICES[rbt.voice_key(voice)]).save(path)
+    return path
+
+
+async def _stop_music_for_announce(p: GuildPlayer):
+    """음악 재생 중인 봇이면 재생 종료 (대기열·재생 패널 정리, 음성채널에는 남는다)."""
+    vc = p.voice()
+    if not p.busy():
+        return
+    log.info(f"[전투지원] {p.client.user}: 음악 재생 종료 후 안내 — {p.current.title if p.current else ''}")
+    p.queue.clear()
+    p.current = None
+    if vc and (vc.is_playing() or vc.is_paused()):
+        vc.stop()
+    await _delete_np(p)
+
+
+async def _announce_with(p: GuildPlayer, channel_ids: list, clip: str):
+    for cid in channel_ids:
+        try:
+            await _stop_music_for_announce(p)
+            async with p.lock:
+                vc = await _connect(p, cid)
+                for _ in range(40):   # 연결 직후 잠깐 기다림
+                    if vc.is_connected():
+                        break
+                    await asyncio.sleep(0.05)
+                if vc.is_playing() or vc.is_paused():
+                    vc.stop()
+                done = asyncio.Event()
+                loop = asyncio.get_running_loop()
+                vc.play(discord.FFmpegPCMAudio(clip, executable=_tools()[2] or "ffmpeg", before_options="-nostdin"),
+                        after=lambda err: loop.call_soon_threadsafe(done.set))
+                try:
+                    await asyncio.wait_for(done.wait(), timeout=30)
+                except asyncio.TimeoutError:
+                    vc.stop()
+            log.info(f"[전투지원] {p.client.user} @ {vc.channel} 안내 완료")
+            _schedule_idle(p)   # 안내 뒤 할 일 없으면 idle_disconnect_seconds 뒤 퇴장
+        except Exception as e:
+            log.warning(f"[전투지원] {p.client.user} → 채널 {cid} 안내 실패: {type(e).__name__}: {e}")
+            await _drop_voice(p)
+
+
+async def _announce(text: str, voice, channel_ids: list) -> dict:
+    ids = [int(c) for c in channel_ids or [] if str(c).strip().isdigit()]
+    chans = [bot.get_channel(c) for c in ids]
+    guild = next((c.guild for c in chans if c is not None), None)
+    if guild is None:
+        return {"ok": False, "error": "대화방 채널을 찾을 수 없음"}
+    async with _assign_locks.setdefault(guild.id, asyncio.Lock()):
+        cands = []
+        for c in _clients():
+            if c.get_guild(guild.id) is None:
+                continue
+            p = get_player(c, guild.id)
+            cands.append((p, p.voice().channel.id if p.connected() else None, p.busy()))
+        plan = rbm.assign_announce(cands, ids, lambda p, cid: not _missing_voice_perms(p.client, cid))
+    if not plan:
+        return {"ok": False, "error": "사용할 수 있는 음악봇이 없음 (채널 권한 확인)"}
+    try:
+        clip = await _announce_clip(text, voice)
+    except Exception as e:
+        return {"ok": False, "error": f"음성 생성 실패: {type(e).__name__}: {e}"}
+
+    async def _run():
+        try:
+            await asyncio.gather(*(_announce_with(p, cs, clip) for p, cs in plan))
+        finally:
+            try:
+                os.remove(clip)
+            except OSError:
+                pass
+    asyncio.create_task(_run())
+    assigned = sum(len(cs) for _, cs in plan)
+    log.info(f"[전투지원] 안내 '{text}' — 대화방 {assigned}/{len(ids)}곳, 음악봇 {len(plan)}개 "
+             f"({', '.join(f'{p.client.user}→{cs}' for p, cs in plan)})")
+    return {"ok": True, "channels": assigned, "bots": len(plan)}
+
+
+async def _ipc_handle(reader, writer):
+    try:
+        req = json.loads((await asyncio.wait_for(reader.readline(), timeout=10)).decode("utf-8"))
+        args = req.get("args") or []
+        if req.get("cmd") == "announce" and len(args) >= 3 and args[0]:
+            resp = await _announce(str(args[0]), args[1], list(args[2] or []))
+        else:
+            resp = {"ok": False, "error": f"알 수 없는 명령: {req.get('cmd')}"}
+    except Exception as e:
+        resp = {"ok": False, "error": f"IPC 오류: {e}"}
+    try:
+        writer.write((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+        await writer.drain()
+    except Exception:
+        pass
+    writer.close()
+
+
+_ipc_server = None
+
+
+async def _start_ipc():
+    global _ipc_server
+    if _ipc_server is not None:
+        return
+    try:
+        _ipc_server = await asyncio.start_server(_ipc_handle, "127.0.0.1", IPC_PORT)
+        log.info(f"[IPC] 전투지원 음성 안내 서버 127.0.0.1:{IPC_PORT}")
+    except Exception as e:
+        log.warning(f"[IPC] 서버 시작 실패 (포트 {IPC_PORT}): {e}")
+
+
 @bot.event
 async def setup_hook():
     bot.add_view(MusicControlView())
+    await _start_ipc()
     _check_voice_libs()
     await _prepare_tools()
     if AUTO_UPDATE:
