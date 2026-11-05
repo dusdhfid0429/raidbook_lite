@@ -35,6 +35,7 @@ from RaidBook_images import normalized_image_file_args, parse_canvas_size
 import RaidBook_schedule as rb_schedule
 import RaidBook_attendance as rb_att
 import RaidBook_clans as rb_clans
+import RaidBook_combat_support as rb_combat
 from RaidBook_boss_data import (
     ensure_loot_sheet as _ensure_loot_sheet_core,
     load_all_loot as _load_all_loot_core,
@@ -327,6 +328,13 @@ if not config.get("_clan_roles_v2_applied"):
     except Exception as e:
         log.info(f"[설정] 혈맹 역할 추가 저장 실패 (이번 실행만 적용): {e}")
 CLAN_ROLES = rb_clans.parse_clan_roles(config.get("clan_roles"))
+# ⚔️ /전투지원 — 채널 ID 자리(combat_alert_channel_id, combat_support.clans)를 설정 파일에 만들어 둔다
+if rb_combat.ensure_section(config, CLAN_ROLES):
+    try:
+        write_json_atomic(CONFIG_PATH, config, log)
+        log.info("[설정] boss_config.json에 전투지원(combat_support) 설정 자리를 추가했어요 — 채널 ID를 채워 주세요")
+    except Exception as e:
+        log.info(f"[설정] 전투지원 설정 자리 저장 실패 (이번 실행만 기본값): {e}")
 # 구버전 방식: 전리품 공지 메시지의 🔨 경매시작 버튼 → 세팅 입력 → ▶️ 시작 (기본 꺼짐)
 LOOT_AUCTION_LEGACY = bool(config.get("loot_auction_legacy", False))
 # 진행판 기본값 "시작가 호가 카운트" (입력 창에 미리 채워짐)
@@ -3684,6 +3692,30 @@ def _tts_ipc_port():
 boss_auction.tts_port = _tts_ipc_port()
 
 
+def _tts_port_for_combat():
+    """전투지원 TTS 안내용 TTS 봇 IPC 포트 (경매 카운트 설정과 무관)."""
+    try:
+        with open(get_config_path("tts_config.json"), encoding="utf-8") as f:
+            return int(json.load(f).get("ipc_port") or 7704)
+    except Exception:
+        return 7704
+
+
+combat_support = rb_combat.CombatSupport(
+    bot, config, CLAN_ROLES, DATA_DIR, is_admin=_is_bot_admin, clan_split_ids=lambda ids: _clan_split_ids(ids),
+    id_to_name=_load_id_to_name_mapping, update_user_mapping=update_user_mapping,
+    tts_port=_tts_port_for_combat(), logger=log)
+
+
+@bot.tree.command(name="전투지원", description="전투지원 요청 — 내용을 적으면 전투알림 채널에 올리고 혈맹 대화방에 음성으로 알려요")
+async def cmd_combat_support(interaction: discord.Interaction):
+    if not combat_support.settings.enabled:
+        await interaction.response.send_message("전투지원 기능이 꺼져 있어요.", ephemeral=True)
+        return
+    log.info(f"[명령어] /전투지원 | 사용자: {getattr(interaction.user, 'display_name', interaction.user)}")
+    await interaction.response.send_modal(rb_combat.CombatModal(combat_support))
+
+
 @bot.check
 async def _slash_permission_check(ctx):
     """슬래시(/) 명령은 채널 제한 없이 사용자 권한만 확인."""
@@ -5923,12 +5955,14 @@ async def _ensure_boss_channels():
     """없는 채널 자동 생성 후 채널 전역값을 갱신. 결과 안내 문자열 목록 반환."""
     global ALERT_CHANNEL_ID, COMMAND_CHANNEL_ID, LOOT_CHANNEL_ID, AUCTION_CHANNEL_ID, VOICE_CHANNEL_IDS
     from RaidBook_channel_setup import ChannelSpec, ensure_channels, resolve_guild
-    keys = ["alert_channel_id", "command_channel_id", "loot_channel_id", "auction_channel_id", "voice_channel_ids"]
+    keys = ["alert_channel_id", "command_channel_id", "loot_channel_id", "auction_channel_id", "voice_channel_ids", rb_combat.ALERT_CHANNEL_KEY]
     guild = resolve_guild(bot, config, keys)
     specs = [
         ChannelSpec("alert_channel_id", "보탐-알림"),
         ChannelSpec("command_channel_id", "보탐-명령"),
     ]
+    if combat_support.settings.enabled:
+        specs.append(ChannelSpec(rb_combat.ALERT_CHANNEL_KEY, rb_combat.ALERT_CHANNEL_NAME))
     if LOOT_ANNOUNCE:
         specs.append(ChannelSpec("loot_channel_id", "전리품"))
     if LOOT_AUCTION_BUTTON:
@@ -5950,6 +5984,7 @@ async def _ensure_boss_channels():
     AUCTION_CHANNEL_ID = int(config.get("auction_channel_id") or 0)
     VOICE_CHANNEL_IDS = [int(c) for c in (config.get("voice_channel_ids") or []) if c]
     boss_auction.channel_id = AUCTION_CHANNEL_ID
+    combat_support.reload()
     notes = [f"🆕 <#{ids[0]}> 채널을 만들었어요 (`{key}`)" for key, ids in created.items()
              if key not in replaced]
     moved = created.get("auction_channel_id")
@@ -5981,6 +6016,7 @@ async def initialize_on_ready():
     bot.add_view(AuctionView(boss_auction))  # 경매 메시지 버튼 재시작 복구
     bot.add_view(BoardView(boss_auction))  # 경매 진행판 버튼 재시작 복구
     bot.add_view(PendingListView())  # 📌 경매 대기 목록 버튼 재시작 복구
+    bot.add_view(rb_combat.CombatView(combat_support))  # ⚔️ 전투지원 알림 버튼 재시작 복구
     await boss_auction.restore()
     global _auction_watch_task
     if _auction_watch_task is None or _auction_watch_task.done():

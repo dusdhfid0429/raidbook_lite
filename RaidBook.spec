@@ -35,7 +35,7 @@ build('RaidBook_boss_Bot.py', 'RaidBook_Boss_Bot', [
     'discord', 'discord.ext.commands', 'openpyxl', 'PIL', 'PIL.Image',
     'RaidBook_common', 'RaidBook_storage', 'RaidBook_store_core', 'RaidBook_store_attend',
     'RaidBook_users', 'RaidBook_ipc', 'RaidBook_boss_data', 'RaidBook_images', 'RaidBook_loot',
-    'RaidBook_attendance', 'RaidBook_clans', 'RaidBook_members', 'RaidBook_party', 'RaidBook_schedule',
+    'RaidBook_attendance', 'RaidBook_clans', 'RaidBook_combat_support', 'RaidBook_members', 'RaidBook_party', 'RaidBook_schedule',
     'RaidBook_boss_auction', 'RaidBook_channel_setup', 'RaidBook_music', 'config_helper',
 ])
 # 음악 봇 — 음성(PyNaCl·davey·opus) 포함. yt-dlp/deno는 첫 실행 시 Tools 폴더로 받고, ffmpeg.exe는 build.ps1이 dist에 복사
