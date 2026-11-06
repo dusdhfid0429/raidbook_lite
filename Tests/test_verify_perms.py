@@ -40,7 +40,8 @@ class FakeMember(discord.Member):
 EVERYONE = FakeRole(1, "@everyone")
 VERIFIED = FakeRole(2, "인증됨")
 JD = FakeRole(3, "정도")
-STAFF = FakeRole(4, "정도운영진")
+STAFF = FakeRole(4, "운영진")
+CLAN_STAFF = FakeRole(6, "정도운영진")   # 표시용 — 권한 남기지 않음 (2026-11-06)
 BOTROLE = FakeRole(5, "BanaRing", managed=True)
 USER = FakeMember(99)
 
@@ -60,9 +61,9 @@ def test_public_channel():
 
 def test_private_channel_keeps_staff_and_bots():
     c = ch(11, {EVERYONE: PO(view_channel=False), STAFF: PO(view_channel=True),
-                BOTROLE: PO(view_channel=True), JD: PO(view_channel=True)})
+                BOTROLE: PO(view_channel=True), JD: PO(view_channel=True), CLAN_STAFF: PO(view_channel=True)})
     new, removed, private = vp.plan_channel(c, EVERYONE, VERIFIED, "운영진", 77)
-    assert private and removed == ["정도"]
+    assert private and removed == ["정도", "정도운영진"] and CLAN_STAFF not in new
     assert VERIFIED not in new                       # 비공개 채널은 인증됨에게 열지 않음
     assert new[STAFF].view_channel is True and BOTROLE in new
 
@@ -70,7 +71,7 @@ def test_private_channel_keeps_staff_and_bots():
 def test_keep_suffix_empty_removes_staff_too():
     c = ch(12, {STAFF: PO(view_channel=True)})
     new, removed, _ = vp.plan_channel(c, EVERYONE, VERIFIED, "", 77)
-    assert removed == ["정도운영진"] and STAFF not in new
+    assert removed == ["운영진"] and STAFF not in new
 
 
 def test_verify_channel():

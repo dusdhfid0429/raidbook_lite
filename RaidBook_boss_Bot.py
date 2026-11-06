@@ -35,6 +35,7 @@ from RaidBook_images import normalized_image_file_args, parse_canvas_size
 import RaidBook_schedule as rb_schedule
 import RaidBook_attendance as rb_att
 import RaidBook_clans as rb_clans
+import RaidBook_perms as rb_perms
 import RaidBook_combat_support as rb_combat
 import RaidBook_broadcast as rb_broadcast
 import RaidBook_boss_manual as rb_manual
@@ -253,18 +254,17 @@ if "settlement" not in config:
     except Exception as e:
         log.info(f"[설정] 정산 비율 기본값 저장 실패 (기본값으로 동작): {e}")
 
-# 두 혈맹이 서버를 같이 쓰면서 슈퍼맨 혈맹 운영진('슈퍼맨운영진' 역할)도 인원체크·경매 관리자 — 예전 설치판에 한 번만 추가
-if not config.get("_superman_admin_applied"):
-    _names = list(config.get("admin_role_names", ["운영진", "슈퍼맨운영진"]) or [])
-    if "슈퍼맨운영진" not in _names:
-        _names.append("슈퍼맨운영진")
-    config["admin_role_names"] = _names
-    config["_superman_admin_applied"] = True
+# 운영진 판정은 '운영진' 역할 하나로 (2026-11-06 동훈님) — ○○운영진 역할은 표시용이라 권한 없음.
+# 예전 설치판의 admin_role_names(운영진·슈퍼맨운영진 …)를 한 번만 ['운영진']으로 맞춘다
+if not config.get("_ops_role_only_applied"):
+    _old_names = list(config.get("admin_role_names") or [])
+    config["admin_role_names"] = ["운영진"]
+    config["_ops_role_only_applied"] = True
     try:
         write_json_atomic(CONFIG_PATH, config, log)
-        log.info(f"[설정] 관리자 역할에 '슈퍼맨운영진' 추가 (admin_role_names: {', '.join(_names)})")
+        log.info(f"[설정] 관리자 역할을 '운영진' 하나로 변경 (이전: {', '.join(map(str, _old_names)) or '없음'})")
     except Exception as e:
-        log.info(f"[설정] 관리자 역할 추가 저장 실패 (이번 실행만 적용): {e}")
+        log.info(f"[설정] 관리자 역할 변경 저장 실패 (이번 실행만 적용): {e}")
 
 # 마감 기본값을 '리젠 정각 마감'(close_minutes 0)으로 바꿨다 — 예전 설치판 값은 한 번만 0으로 맞추고, 이후 운영진이 고친 값은 그대로 둔다
 if not config.get("_close_at_spawn_applied"):
@@ -293,6 +293,9 @@ async def _tree_on_error(interaction, error):
 
 
 bot.tree.on_error = _tree_on_error
+# 🛡️ 모든 슬래시 명령은 들어오자마자 권한 표(RaidBook_perms.COMMANDS)부터 확인
+rb_perms.configure(config)
+bot.tree.interaction_check = rb_perms.check_command
 
 ALERT_CHANNEL_ID = config["alert_channel_id"]
 COMMAND_CHANNEL_ID = config.get("command_channel_id", ALERT_CHANNEL_ID)
@@ -300,15 +303,14 @@ LOOT_CHANNEL_ID = config.get("loot_channel_id", COMMAND_CHANNEL_ID)
 # 슬래시 명령 사용 허용 역할 (서버 관리 권한 보유자는 항상 허용)
 ADMIN_ROLE_IDS = {int(r) for r in (config.get("admin_role_ids") or []) if r}
 # 역할 이름으로도 관리자 판정 (서버에서 '운영진' 역할을 주면 바로 인원체크·경매·정산 사용 가능)
-ADMIN_ROLE_NAMES = {str(n).strip() for n in (config.get("admin_role_names", ["운영진", "슈퍼맨운영진"]) or []) if str(n).strip()}
+ADMIN_ROLE_NAMES = {str(n).strip() for n in (config.get("admin_role_names", ["운영진"]) or []) if str(n).strip()}
 # 음성채널 인원체크 대상 채널 (비우면 서버의 모든 음성채널, AFK 채널 제외)
 VOICE_CHANNEL_IDS = [int(c) for c in (config.get("voice_channel_ids") or []) if c]
 # 보스 출현 정각에 음성채널 접속자를 자동 참석 처리
 VOICE_CHECK_AT_SPAWN = bool(config.get("voice_check_at_spawn", True))
-# 알림 메시지의 참석/취소 버튼 숨김 (참석자는 인원체크 버튼·명령으로만 음성채널에서 수집)
-HIDE_ATTEND_BUTTONS = bool(config.get("hide_attend_buttons", False))
+# 참석은 보탐 음성방 인원 수집(정각 자동 인원체크·인원체크 버튼·/인원체크)으로만 기록 — 참석/취소 버튼은 없앴다 (2026-11-06)
 # 마감 시 비활성화되는 참석 계열 버튼
-ATTEND_BUTTON_IDS = ("boss_join", "boss_cancel", "boss_voicecheck")
+ATTEND_BUTTON_IDS = ("boss_voicecheck",)
 # 득템 채널 공지 — 💎 득템·경매(진행판)를 쓰면 기록·결과가 알림 메시지에 남으므로 기본 꺼짐
 LOOT_ANNOUNCE = bool(config.get("loot_announce", not config.get("loot_auction_button", False)))
 # 보스 알림의 💎 득템·경매 — 아이템 입력 한 번으로 득템 기록 + 경매 진행판 자동 진행 (RaidBook_boss_auction)
@@ -354,8 +356,6 @@ AUCTION_CHANNEL_VOICE = bool(config.get("auction_channel_voice", True))
 AUCTION_CURRENCY = str(config.get("auction_currency", "아데나") or "")
 # 설정된 채널이 없거나 삭제됐으면 시작 시 "RaidBook" 카테고리에 자동 생성 (채널 관리 권한 필요)
 AUTO_CREATE_CHANNELS = bool(config.get("auto_create_channels", True))
-# 참석자가 아니어도 획득 아이템 버튼을 사용할 수 있는 강제 허용 UID 목록 (관리자/대리 입력 등)
-LOOT_FORCE_USER_IDS = set(str(u) for u in (config.get("loot_force_user_ids") or []))
 
 TOKEN = config["token"]
 daily_refresh_hour = config.get("daily_refresh_hour", 0)
@@ -1400,7 +1400,7 @@ def _loot_text_from_announcement(message) -> str:
     return ""
 
 
-class LootAuctionView(ui.View):
+class LootAuctionView(rb_perms.GuardedView):
     """전리품 공지 메시지의 경매시작 버튼 (persistent)."""
 
     def __init__(self):
@@ -1843,7 +1843,7 @@ def _alert_link(mid):
     return f"https://discord.com/channels/{gid}/{ALERT_CHANNEL_ID}/{mid}"
 
 
-class PendingListView(discord.ui.View):
+class PendingListView(rb_perms.GuardedView):
     """📌 경매 대기 목록 버튼 (persistent): 아이템 고르기(관리자) / 🔄 새로고침 / 🙈 목록에서 빼기(관리자)."""
 
     def __init__(self, entries=None):
@@ -2057,7 +2057,7 @@ async def _apply_board_results(board):
     log.info(f"[진행판 결과 반영] {boss_name} {boss_time} {mid} | {results[:120]}")
 
 
-class AttendView(ui.View):
+class AttendView(rb_perms.GuardedView):
     def __init__(self, message_id=None, boss_name=None, boss_time=None, created_date=None, loot=None, expired=False, disable_time=None,
                  persistent=False):
         super().__init__(timeout=None)
@@ -2092,10 +2092,6 @@ class AttendView(ui.View):
         self.confirmed_attendees: list = []
         self.confirmed_at: str = ""
         self.confirm_dt = None  # 자동 확정 예정 시각 (카운트다운용)
-        if HIDE_ATTEND_BUTTONS:
-            for child in list(self.children):
-                if getattr(child, "custom_id", None) in ("boss_join", "boss_cancel"):
-                    self.remove_item(child)
         if not PARTY_ENABLED:
             for child in list(self.children):
                 if getattr(child, "custom_id", None) == "boss_party":
@@ -2117,7 +2113,7 @@ class AttendView(ui.View):
             self.apply_phase(expired or _close_time_passed(self.disable_time))
 
     def apply_phase(self, closed):
-        """마감 전: 인원체크(참석/취소) 켜짐, ➕/➖ 숨김 / 마감 후: 인원체크 꺼짐, ➕/➖ 노출.
+        """마감 전: 인원체크 켜짐, ➕/➖ 숨김 / 마감 후: 인원체크 꺼짐, ➕/➖ 노출.
         모든 버튼은 이 한 곳에서만 마감 여부에 맞춰 바뀐다."""
         self.expired = bool(closed)
         for child in self.children:
@@ -2325,151 +2321,6 @@ class AttendView(ui.View):
             except Exception as e:
                 log.warning(f"[파티 확정 메시지 편집 실패] {e}")
 
-    @ui.button(label="참석", style=discord.ButtonStyle.success, custom_id="boss_join")
-    async def join(self, interaction: discord.Interaction, button: ui.Button):
-        try:
-            await interaction.response.defer()
-        except Exception as e:
-            log.info(f"[참석-defer 실패] msg:{interaction.message.id} user:{interaction.user.id} | {type(e).__name__}: {e}")
-            return
-        async with self._view_lock:
-            self._load_latest_from_json(interaction.message.id)
-            uid = str(interaction.user.id)
-            name = interaction.user.display_name
-            update_user_mapping(uid, name)
-            if uid not in self.attendees:
-                self.attendees.append(uid)
-                # JSON에 키가 없으면(auto_close 후 삭제된 경우) upsert로 재등록 — 없으면 재시작 시 소멸
-                _upsert_active_message_attendees(
-                    self.message_id, self.attendees,
-                    boss_name=self.boss_name, boss_time=self.boss_time,
-                    created_date=self.created_date, disable_time=self.disable_time,
-                    channel_id=interaction.channel_id, loot=self.loot,
-                    image_url=getattr(self, "image_url", ""),
-                    image_filename=getattr(self, "image_filename", ""),
-                    loot_announcement_id=getattr(self, "loot_announcement_id", ""))
-                log.info(rb_att.attend_log_line("참석", f"{self.boss_name} {self.boss_time}",
-                                                self.message_id, name, uid, len(self.attendees)))
-                ack_msg = f"🎉 {name}님, 참석 처리됐어요!"
-                # close_minutes 비활성 시 마감 시점에 저장하는 기존 로직이 호출되지 않으므로
-                # 버튼 클릭마다 Excel에도 즉시 반영해 데이터 유실 방지 (0은 정각 마감 = 활성)
-                _cm = config.get("close_minutes")
-                try: _cm = int(_cm) if _cm is not None else None
-                except Exception: _cm = None
-                if _cm is None or _cm < 0:
-                    try:
-                        await save_boss_attendees_to_excel(
-                            self.message_id, self.boss_name, self.boss_time,
-                            self.attendees, self.created_date)
-                    except Exception as e:
-                        log.info(f"[참석-즉시저장 실패] {e}")
-            else:
-                ack_msg = f"😊 {name}님은 이미 참석하고 있어요."
-            id_to_name = _load_id_to_name_mapping()
-            names = ", ".join(id_to_name.get(u, u) for u in self.attendees) if self.attendees else "없음"
-            image_filename, image_url = _message_image_ref(interaction.message)
-            if image_filename:
-                self.image_filename = image_filename
-            if image_url:
-                self.image_url = image_url
-            image_file, image_kwargs = _boss_image_file_and_kwargs(self.boss_name, interaction.message)
-            confirmed_kwargs = self._make_confirmed_embed_kwargs(id_to_name) if self.party_confirmed else {}
-            if self.party_confirmed:
-                self._apply_confirmed_button_state()
-            countdown_text = self._get_countdown_text()
-            embed = make_attend_embed(self.boss_name, len(self.attendees), names, self.boss_time,
-                                      expired=getattr(self, "expired", False), loot=self.loot,
-                                      disable_time=self.disable_time,
-                                      countdown_text=countdown_text,
-                                      loot_acquirers=getattr(self, "loot_acquirers", ""),
-                                      **image_kwargs, **confirmed_kwargs, attendee_ids=self.attendees)
-            # 확인 문구를 먼저 — 메시지 수정은 같은 채널 수정 속도 제한에 걸려 몰리면 늦어질 수 있다
-            try:
-                await interaction.followup.send(ack_msg, ephemeral=True)
-            except Exception:
-                pass
-            try:
-                await _edit_message_with_image(
-                    interaction.message,
-                    embed=embed,
-                    view=self,
-                    image_file=image_file,
-                    content=_boss_alert_content(self.boss_name, self.boss_time, expired=getattr(self, "expired", False)),
-                )
-            except Exception:
-                pass
-
-    @ui.button(label="취소", style=discord.ButtonStyle.secondary, custom_id="boss_cancel")
-    async def cancel(self, interaction: discord.Interaction, button: ui.Button):
-        try:
-            await interaction.response.defer()
-        except Exception:
-            return
-        async with self._view_lock:
-            self._load_latest_from_json(interaction.message.id)
-            uid = str(interaction.user.id)
-            name = interaction.user.display_name
-            update_user_mapping(uid, name)
-            if uid in self.attendees:
-                self.attendees.remove(uid)
-                _upsert_active_message_attendees(
-                    self.message_id, self.attendees,
-                    boss_name=self.boss_name, boss_time=self.boss_time,
-                    created_date=self.created_date, disable_time=self.disable_time,
-                    channel_id=interaction.channel_id, loot=self.loot,
-                    image_url=getattr(self, "image_url", ""),
-                    image_filename=getattr(self, "image_filename", ""),
-                    loot_announcement_id=getattr(self, "loot_announcement_id", ""))
-                log.info(rb_att.attend_log_line("취소", f"{self.boss_name} {self.boss_time}",
-                                                self.message_id, name, uid, len(self.attendees)))
-                ack_msg = f"👋 {name}님, 참석을 취소했어요."
-                # close_minutes 비활성 시 즉시 Excel 동기화 (유실 방지, 0은 정각 마감 = 활성)
-                _cm = config.get("close_minutes")
-                try: _cm = int(_cm) if _cm is not None else None
-                except Exception: _cm = None
-                if _cm is None or _cm < 0:
-                    try:
-                        await save_boss_attendees_to_excel(
-                            self.message_id, self.boss_name, self.boss_time,
-                            self.attendees, self.created_date, prune=True)
-                    except Exception as e:
-                        log.info(f"[취소-즉시저장 실패] {e}")
-            else:
-                ack_msg = f"🤔 {name}님은 아직 참석하지 않으셨어요."
-            id_to_name = _load_id_to_name_mapping()
-            names = ", ".join(id_to_name.get(u, u) for u in self.attendees) if self.attendees else "없음"
-            image_filename, image_url = _message_image_ref(interaction.message)
-            if image_filename:
-                self.image_filename = image_filename
-            if image_url:
-                self.image_url = image_url
-            image_file, image_kwargs = _boss_image_file_and_kwargs(self.boss_name, interaction.message)
-            confirmed_kwargs = self._make_confirmed_embed_kwargs(id_to_name) if self.party_confirmed else {}
-            if self.party_confirmed:
-                self._apply_confirmed_button_state()
-            countdown_text = self._get_countdown_text()
-            embed = make_attend_embed(self.boss_name, len(self.attendees), names, self.boss_time,
-                                      expired=getattr(self, "expired", False), loot=self.loot,
-                                      disable_time=self.disable_time,
-                                      countdown_text=countdown_text,
-                                      loot_acquirers=getattr(self, "loot_acquirers", ""),
-                                      **image_kwargs, **confirmed_kwargs, attendee_ids=self.attendees)
-            # 확인 문구를 먼저 — 메시지 수정은 같은 채널 수정 속도 제한에 걸려 몰리면 늦어질 수 있다
-            try:
-                await interaction.followup.send(ack_msg, ephemeral=True)
-            except Exception:
-                pass
-            try:
-                await _edit_message_with_image(
-                    interaction.message,
-                    embed=embed,
-                    view=self,
-                    image_file=image_file,
-                    content=_boss_alert_content(self.boss_name, self.boss_time, expired=getattr(self, "expired", False)),
-                )
-            except Exception:
-                pass
-
     @ui.button(label="인원체크", style=discord.ButtonStyle.success, custom_id="boss_voicecheck")
     async def voice_check_button(self, interaction: discord.Interaction, button: ui.Button):
         """voice_channel_ids(비면 전체 음성채널) 접속자를 이 알림의 참석자로 추가. 명령 권한 보유자만."""
@@ -2529,12 +2380,9 @@ class AttendView(ui.View):
     async def attendee_remove_button(self, interaction: discord.Interaction, button: ui.Button):
         await self._open_attendee_picker(interaction, "remove")
 
-    def _is_loot_attendee(self, user):
-        uid = str(user.id)
-        canonical_uid = _resolve_uid(uid)
-        if uid in self.attendees or canonical_uid in {_resolve_uid(a) for a in self.attendees}:
-            return True
-        return uid in LOOT_FORCE_USER_IDS or canonical_uid in LOOT_FORCE_USER_IDS or _is_bot_admin(user)
+    def _can_manage_loot(self, user):
+        """득템 기록·경매생성은 운영진만 (2026-11-06 동훈님 — 예전엔 그 보스 참석자도 가능)."""
+        return _is_bot_admin(user)
 
     async def _load_for_modal(self, interaction: discord.Interaction):
         """팝업용 알림 데이터 로드. 진행 중 알림은 즉시(팝업을 첫 응답으로 띄울 수 있음),
@@ -2565,7 +2413,7 @@ class AttendView(ui.View):
             self.loot_acquirers = bundle["loot_acquirers"]
             self.loot_announcement_id = bundle["loot_announcement_id"]
             self.expired = True
-        return deferred, (self._is_loot_attendee(interaction.user) or _is_bot_admin(interaction.user))
+        return deferred, self._can_manage_loot(interaction.user)
 
     async def _reply(self, interaction, deferred, text, view=None):
         kwargs = {"ephemeral": True}
@@ -2587,7 +2435,7 @@ class AttendView(ui.View):
         """📦 획득 아이템 — 기록만 하는 입력창."""
         deferred, allowed = await self._load_for_modal(interaction)
         if not allowed:
-            await self._reply(interaction, deferred, "🤔 이 보스에 참석한 사람만 득템을 기록할 수 있어요.")
+            await self._reply(interaction, deferred, "⛔ 득템 기록은 운영진만 할 수 있어요.")
             return
         rev, prefill = get_loot_revision(interaction.message.id), self.loot or ""
         await self._open_with_modal(interaction, deferred, lambda: LootRecordModal(self, rev, prefill), "입력창 열기", "📦")
@@ -2637,27 +2485,12 @@ class AttendView(ui.View):
             self.loot_announcement_id = bundle["loot_announcement_id"]
             self.expired = True
 
-        uid = str(interaction.user.id)
-        name = interaction.user.display_name
-        # alias 적용한 정규 UID 기준으로도 비교 (부계정/동명이인 통합 검사)
-        canonical_uid = _resolve_uid(uid)
-        attendee_canonicals = {_resolve_uid(a) for a in self.attendees}
-        is_attendee = (uid in self.attendees) or (canonical_uid in attendee_canonicals)
-        is_force_allowed = (uid in LOOT_FORCE_USER_IDS) or (canonical_uid in LOOT_FORCE_USER_IDS) \
-            or _is_bot_admin(interaction.user)
-
-        if not is_attendee and not is_force_allowed:
+        if not self._can_manage_loot(interaction.user):
             try:
-                await interaction.followup.send(
-                    f"🤔 {name}님은 이 보스에 참석하지 않으셔서 아이템 기록은 참석자만 가능해요.",
-                    ephemeral=True,
-                )
+                await interaction.followup.send("⛔ 득템 기록은 운영진만 할 수 있어요.", ephemeral=True)
             except Exception:
                 pass
             return
-
-        if is_force_allowed and not is_attendee:
-            log.info(f"[loot 강제허용] {name}({uid}) → 보스 {self.boss_name} {self.boss_time} {self.message_id}")
 
         # 개수 선택 → 개별 입력 모달
         try:
@@ -2689,7 +2522,7 @@ class AttendView(ui.View):
         self.channel_id = interaction.channel_id
         deferred, allowed = await self._load_for_modal(interaction)
         if not allowed:
-            await self._reply(interaction, deferred, "🤔 이 보스에 참석한 사람만 경매를 만들 수 있어요.")
+            await self._reply(interaction, deferred, "⛔ 경매생성은 운영진만 할 수 있어요.")
             return
         options = auction_options(self.loot or "", boss_auction.boards_for_source(msg_id))
         if not options:
@@ -2896,9 +2729,7 @@ def _apply_embed_image(embed, *, thumbnail_file=None, image_url="", image_filena
 
 
 def _join_guide_text():
-    """알림 안내 문구. 참석 버튼을 숨긴(음성 인원체크로 참석 기록) 서버는 보탐 음성방으로 안내하고 채널 링크를 단다."""
-    if not HIDE_ATTEND_BUTTONS:
-        return "보스 탐에 참여하실 분은 아래 버튼을 눌러주세요!"
+    """알림 안내 문구 — 참석은 음성 인원체크로 기록되므로 보탐 음성방으로 안내하고 채널 링크를 단다."""
     links = " ".join(f"<#{cid}>" for cid in VOICE_CHANNEL_IDS)
     if links:
         return f"🎙️ 보탐 음성방으로 이동해 주세요! 👉 {links}"
@@ -3710,18 +3541,9 @@ async def on_message(message):
 
 
 def _is_bot_admin(member) -> bool:
-    """명령 사용 권한: 서버 소유자, 서버 관리/관리자 권한, 또는 관리자 역할 보유
-    (config admin_role_ids 의 역할 ID, admin_role_names 의 역할 이름 — 기본 '운영진', '슈퍼맨운영진',
-    그리고 이름이 '운영진'으로 끝나는 각 혈맹 운영진 역할 — 정도운영진·썰자운영진 … 목록에 없어도 허용)."""
-    if not isinstance(member, discord.Member):
-        return False
-    if member.guild is not None and member.id == member.guild.owner_id:
-        return True
-    perms = member.guild_permissions
-    if perms.administrator or perms.manage_guild:
-        return True
-    return any(r.id in ADMIN_ROLE_IDS or r.name.strip() in ADMIN_ROLE_NAMES or rb_clans.is_staff_role(r.name)
-               for r in member.roles)
+    """운영진인지 — 공용 권한 모듈(RaidBook_perms.is_staff)과 같은 기준: 서버 주인 또는 '운영진' 역할
+    (admin_role_names·admin_role_ids). ○○운영진 역할은 표시용이라 아님."""
+    return rb_perms.is_staff(member)
 
 
 boss_auction = BossAuction(bot, channel_id=AUCTION_CHANNEL_ID, data_dir=DATA_DIR,
@@ -3794,8 +3616,7 @@ async def cmd_verify_perms(interaction: discord.Interaction, 동작: str = "appl
     if guild is None or not isinstance(member, discord.Member):
         await interaction.response.send_message("서버 안에서만 쓸 수 있어요.", ephemeral=True)
         return
-    if not (member.id == guild.owner_id or member.guild_permissions.administrator
-            or member.guild_permissions.manage_guild):
+    if not rb_perms.is_server_admin(member):
         await interaction.response.send_message("서버 소유자나 '서버 관리' 권한이 있는 사람만 쓸 수 있어요.", ephemeral=True)
         return
     log.info(f"[명령어] /인증권한 {동작} | 사용자: {member.display_name}")
@@ -3823,7 +3644,7 @@ async def cmd_verify_perms(interaction: discord.Interaction, 동작: str = "appl
     if not guild.me.guild_permissions.manage_roles:
         await interaction.response.send_message("봇에 '역할 관리' 권한이 없어 채널 권한을 바꿀 수 없어요.", ephemeral=True)
         return
-    keep, vcid = verifier.settings.keep_role_suffix, verifier.settings.channel_id
+    keep, vcid = verifier.settings.keep_role_name, verifier.settings.channel_id
     plan = rb_vperms.build_plan(guild, role, keep, vcid)
     if not plan:
         await interaction.response.send_message("✅ 이미 모든 채널이 인증 권한으로 맞춰져 있어요.", ephemeral=True)
@@ -3912,10 +3733,6 @@ async def cmd_broadcast(interaction: discord.Interaction, 내용: str):
         where = " ".join(f"<#{c}>" for c in bs.channel_ids)
         await interaction.response.send_message(f"/전파는 {where} 채널에서만 쓸 수 있어요.", ephemeral=True)
         return
-    if not bs.can_use(r.name for r in getattr(user, "roles", []) or []):
-        await interaction.response.send_message(
-            f"/전파는 '{bs.role_suffix}'(으)로 끝나는 역할이 있는 사람만 쓸 수 있어요.", ephemeral=True)
-        return
     content = bs.clean(내용)
     if not content:
         await interaction.response.send_message("내용을 적어 주세요.", ephemeral=True)
@@ -3938,12 +3755,14 @@ async def cmd_broadcast(interaction: discord.Interaction, 내용: str):
 
 @bot.check
 async def _slash_permission_check(ctx):
-    """슬래시(/) 명령은 채널 제한 없이 사용자 권한만 확인."""
+    """슬래시(/) 명령 권한 — RaidBook_perms 권한 표 기준."""
     if ctx.interaction is None:
         return False  # ! 접두사 명령 비활성 (on_message에서도 처리하지 않음)
-    if _is_bot_admin(ctx.author):
+    # 권한은 bot.tree.interaction_check(RaidBook_perms 권한 표)에서 이미 확인 — 한 번 더 같은 표로 확인
+    level = rb_perms.command_level(ctx.command.name)
+    if rb_perms.allowed(level if level is not None else rb_perms.STAFF, ctx.author):
         return True
-    raise commands.CheckFailure("이 명령을 사용할 권한이 없어요. (서버 관리 권한 또는 운영진 역할 필요)")
+    raise commands.CheckFailure(rb_perms.deny_text(level, f"/{ctx.command.name}"))
 
 
 @bot.before_invoke
@@ -6420,27 +6239,12 @@ async def voicecheck(ctx, message_id: str = None):
     await ctx.send((f"🎙 <#{vc.id}> 기준\n" + "\n".join(lines))[:1990])
 
 
-def _is_headcount_staff(member) -> bool:
-    """/인원현황 권한: 역할 이름이 '운영진'으로 끝나는 각 혈맹 운영진 + 서버 소유자·관리 권한자."""
-    if not isinstance(member, discord.Member):
-        return False
-    if member.id == member.guild.owner_id:
-        return True
-    perms = member.guild_permissions
-    if perms.administrator or perms.manage_guild:
-        return True
-    return any(rb_clans.is_staff_role(r.name) for r in member.roles)
-
-
 @bot.hybrid_command(name="인원현황", aliases=["headcount"])
 async def headcount(ctx):
     """명령을 입력한 음성채널의 현재 인원을 혈맹별 숫자로 그 채널 채팅에 표시 (보스 알림은 건드리지 않음)."""
     async def deny(text):
         await ctx.send(text, ephemeral=True)
 
-    if not _is_headcount_staff(ctx.author):
-        await deny("⛔ 운영진만 쓸 수 있어요.")
-        return
     vc = ctx.channel if isinstance(ctx.channel, (discord.VoiceChannel, discord.StageChannel)) else None
     if vc is None and isinstance(ctx.author, discord.Member) and ctx.author.voice:
         vc = ctx.author.voice.channel

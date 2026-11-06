@@ -31,13 +31,15 @@ def test_channel_and_role_limits():
     s = bc.Settings(config)
     assert s.channel_allowed(1567863699484577942) and s.channel_allowed("1567863699484577942")
     assert not s.channel_allowed(123)
-    assert s.can_use(["@everyone", "슈퍼맨운영진"])
-    assert s.can_use(["정도운영진 "]) and s.can_use(["운영진"])
-    assert not s.can_use(["슈퍼맨", "운영진님"]) and not s.can_use([])
     config["broadcast"]["channel_ids"] = []
     assert bc.Settings(config).channel_allowed(123)          # 비면 모든 채널
-    config["broadcast"]["role_suffix"] = ""
-    assert not bc.Settings(config).can_use(["운영진"])        # 비면 아무도 못 씀
+
+
+def test_old_role_suffix_removed():
+    config = {"broadcast": {"enabled": True, "role_suffix": "운영진"}}
+    assert bc.ensure_section(config)
+    assert "role_suffix" not in config["broadcast"] and "role_name" not in config["broadcast"]
+    assert not bc.ensure_section(config)
 
 
 def test_text_and_speech():
