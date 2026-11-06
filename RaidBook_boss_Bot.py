@@ -3196,9 +3196,10 @@ def _schedule_party_confirm_task(attend_view: "AttendView", message_id: int, cha
     asyncio.ensure_future(_auto_confirm())
 
 
-async def _post_boss_alert(boss_name, spawn_dt):
+async def _post_boss_alert(boss_name, spawn_dt, *, skip_voice_check=False):
     """보스 알림 메시지 1건 게시 (interval/daily 공용 콜백, /보스알림 수동 생성도 같이 씀).
     메시지 생성·활성 저장·TTS·자동 마감·파티 확정까지 담당. 타이밍은 RaidBook_schedule 엔진.
+    skip_voice_check: 음성방 인원체크를 하지 않음 (/보스알림 지난 일시 — 기록용, ➕ 인원 추가로만 기록).
     게시한 메시지를 돌려준다 (채널을 못 찾으면 None)."""
     channel = bot.get_channel(ALERT_CHANNEL_ID)
     if channel is None:
@@ -3245,7 +3246,10 @@ async def _post_boss_alert(boss_name, spawn_dt):
                         image_filename=attend_view.image_filename)
 
     _schedule_party_confirm_task(attend_view, msg.id, channel.id, boss_time_str)
-    _schedule_voice_check(msg.id, spawn_dt)
+    if skip_voice_check:
+        _SPAWN_CHECKED.add(str(msg.id))   # 마감 직전 인원체크도 건너뜀
+    else:
+        _schedule_voice_check(msg.id, spawn_dt)
 
     if disable_time is not None:
         _schedule_close_trigger(msg.id, disable_time)
@@ -3863,16 +3867,17 @@ async def _create_manual_boss_alert(interaction: discord.Interaction, boss_name,
         await interaction.followup.send(
             f"⚠️ **{boss_name}** {when} 보스알림이 이미 있어요 👉 {_alert_link(dup)}", ephemeral=True)
         return
-    msg = await _post_boss_alert(boss_name, spawn_dt)
+    past = spawn_dt <= datetime.now()
+    # 지난 일시는 기록용 — 지금 음성방 인원은 그때 참석자가 아닐 수 있어 인원체크 없이 마감, ➕ 인원 추가로 기록
+    msg = await _post_boss_alert(boss_name, spawn_dt, skip_voice_check=past)
     if msg is None:
         await interaction.followup.send("❌ 보스알림 채널을 찾을 수 없어요.", ephemeral=True)
         return
-    past = spawn_dt <= datetime.now()
     log.info(f"[수동 생성] {boss_name} {spawn_dt:%Y-%m-%d %H:%M} | 운영진: {user} | 메시지 ID: {msg.id}"
-             + (" | 지난 일시 → 즉시 인원체크·마감" if past else ""))
+             + (" | 지난 일시 → 인원체크 없이 마감" if past else ""))
     await interaction.followup.send(
         f"✅ **{boss_name}** {when} 보스알림을 만들었어요"
-        + (" (이미 지난 일시라 바로 인원체크 후 마감돼요)" if past else "")
+        + (" (이미 지난 일시라 인원체크 없이 마감돼요. ➕ 인원 추가로 기록해 주세요)" if past else "")
         + f" 👉 {msg.jump_url}", ephemeral=True)
 
 
