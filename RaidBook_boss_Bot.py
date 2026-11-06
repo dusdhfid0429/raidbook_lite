@@ -295,7 +295,7 @@ async def _tree_on_error(interaction, error):
 bot.tree.on_error = _tree_on_error
 # 🛡️ 모든 슬래시 명령은 들어오자마자 권한 표(RaidBook_perms.COMMANDS)부터 확인
 rb_perms.configure(config)
-bot.tree.interaction_check = rb_perms.check_command
+bot.tree.interaction_check = rb_perms.command_gate("boss")
 
 ALERT_CHANNEL_ID = config["alert_channel_id"]
 COMMAND_CHANNEL_ID = config.get("command_channel_id", ALERT_CHANNEL_ID)
@@ -3607,7 +3607,7 @@ verifier = rb_verify.Verifier(bot, config, DATA_DIR, save_config=_save_boss_conf
                               default_log_channel=lambda: COMMAND_CHANNEL_ID, logger=log)
 
 
-@bot.tree.command(name="인증권한", description="서버 관리자 전용 — 모든 채널을 '인증됨' 역할만 보이게 바꾸거나(미리보기 후 적용) 되돌려요")
+@bot.tree.command(name="인증권한", description="서버 주인 전용 — 모든 채널을 '인증됨' 역할만 보이게 바꾸거나(미리보기 후 적용) 되돌려요")
 @discord.app_commands.describe(동작="적용(미리보기 후 ✅) 또는 복구(마지막 백업으로 되돌리기)")
 @discord.app_commands.choices(동작=[discord.app_commands.Choice(name="적용", value="apply"),
                                   discord.app_commands.Choice(name="복구", value="restore")])
@@ -3616,8 +3616,8 @@ async def cmd_verify_perms(interaction: discord.Interaction, 동작: str = "appl
     if guild is None or not isinstance(member, discord.Member):
         await interaction.response.send_message("서버 안에서만 쓸 수 있어요.", ephemeral=True)
         return
-    if not rb_perms.is_server_admin(member):
-        await interaction.response.send_message("서버 소유자나 '서버 관리' 권한이 있는 사람만 쓸 수 있어요.", ephemeral=True)
+    if not rb_perms.allowed(rb_perms.command_level("인증권한"), member):
+        await interaction.response.send_message(rb_perms.deny_text(rb_perms.command_level("인증권한"), "/인증권한"), ephemeral=True)
         return
     log.info(f"[명령어] /인증권한 {동작} | 사용자: {member.display_name}")
     verifier.reload()

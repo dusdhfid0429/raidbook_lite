@@ -18,6 +18,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import RaidBook_tts as rbt
+import RaidBook_perms as rb_perms
 from RaidBook_music import find_ffmpeg
 from RaidBook_storage import DailyFileHandler, write_json_atomic
 from config_helper import (
@@ -132,6 +133,9 @@ ALLOWED_CHANNEL_IDS = _allowed_ids()   # 비어 있으면 모든 채널
 
 intents = discord.Intents.default()   # 슬래시 명령만 쓰므로 Message Content Intent 불필요
 bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents, help_command=None)
+# 🛡️ TTS 명령도 공용 권한 표(RaidBook_perms) 먼저 확인
+rb_perms.configure_from_file(get_config_path("boss_config.json"), log)
+bot.tree.interaction_check = rb_perms.command_gate("tts")
 
 
 # ── 서버별 읽기 대기열 ────────────────────────────────────────────────────
@@ -282,7 +286,7 @@ async def _queue_speech(interaction: discord.Interaction, voice: str, name: str,
     return None
 
 
-class ReplayView(discord.ui.View):
+class ReplayView(rb_perms.GuardedView):
     def __init__(self):
         super().__init__(timeout=None)
 

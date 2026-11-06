@@ -52,15 +52,19 @@ def test_staff_is_exact_role_only():
     assert not rp.is_staff(FakeMember(5, ["정도운영진"]))                     # ○○운영진은 표시용
     assert not rp.is_staff(FakeMember(5, ["슈퍼맨운영진", "정도"]))
     assert not rp.is_staff(FakeMember(5, [], manage=True))                    # 서버 관리 권한만으론 아님
+    assert not rp.is_staff(FakeMember(5, [], admin=True))
     assert not rp.is_staff("not a member")
 
 
-def test_server_admin():
+def test_owner_only():
     _reset()
-    assert rp.is_server_admin(FakeMember(5, [], manage=True))
-    assert rp.is_server_admin(FakeMember(5, [], admin=True))
-    assert rp.is_server_admin(FakeMember(OWNER_ID))
-    assert not rp.is_server_admin(FakeMember(5, ["운영진"]))
+    assert rp.is_owner(FakeMember(OWNER_ID))
+    for m in (FakeMember(5, [], manage=True), FakeMember(5, [], admin=True), FakeMember(5, ["운영진"])):
+        assert not rp.is_owner(m)
+        assert not rp.allowed(rp.command_level("restart"), m)                  # 프로그램 조작 = 서버 주인만
+        assert not rp.allowed(rp.command_level("panel", "watchdog"), m)
+        assert not rp.allowed(rp.component_level("wd_panel_restart")[0], m)
+    assert rp.allowed(rp.command_level("인증권한"), FakeMember(OWNER_ID))
 
 
 def test_levels():
@@ -69,7 +73,11 @@ def test_levels():
     assert rp.allowed(rp.command_level("전투지원"), member)
     assert not rp.allowed(rp.command_level("보스알림"), member) and rp.allowed(rp.command_level("보스알림"), staff)
     assert not rp.allowed(rp.command_level("인증권한"), staff)
-    assert rp.allowed(rp.command_level("재생"), member)                       # 음악봇 명령 → 표에 없음 → 통과
+    assert rp.command_level("재생") is None                                   # 보스봇 표엔 없음 → 보스봇은 그냥 지나감
+    assert rp.command_level("재생", "music") == rp.NONE and rp.allowed(rp.command_level("재생", "music"), member)
+    assert rp.command_level("보스알림", "music") is None                      # 음악봇은 보스봇 명령을 막지 않음
+    assert rp.allowed(rp.component_level("rb_music:skip")[0], member)
+    assert rp.allowed(rp.command_level("tts", "tts"), member)
     assert not rp.allowed(rp.component_level("boss_loot")[0], member)        # 득템 기록 운영진 전용
     assert not rp.allowed(rp.component_level("boss_auction_create")[0], member)
     assert rp.allowed(rp.component_level("boss_board_bid")[0], member)       # 참석자 확인은 버튼 안에서
@@ -79,13 +87,14 @@ def test_levels():
 
 def test_admin_role_config_and_overrides():
     rp.configure({"admin_role_names": ["운영진", "부운영"], "admin_role_ids": [777],
-                  "permission_overrides": {"전투지원": "운영진", "boss_loot": "누구나", "x": "엉터리"}})
+                  "permission_overrides": {"전투지원": "운영진", "boss_loot": "누구나", "재생": "서버주인", "x": "엉터리"}})
     assert rp.is_staff(FakeMember(5, ["부운영"]))
     m = FakeMember(5, ["정도"])
     m._fake_roles.append(SimpleNamespace(id=777, name="아무거나"))
     assert rp.is_staff(m)
     assert rp.command_level("전투지원") == rp.STAFF
-    assert rp.component_level("boss_loot") == (rp.EVERYONE, "득템 기록")
+    assert rp.component_level("boss_loot") == (rp.NONE, "득템 기록")
+    assert rp.command_level("재생", "music") == rp.OWNER
     assert rp.command_level("x") is None
     _reset()
 
@@ -115,11 +124,23 @@ def test_check_command_denies_with_ephemeral():
 def _sources():
     out = {}
     for f in os.listdir(ROOT):
-        if f.startswith("RaidBook_") and f.endswith(".py") and f not in ("RaidBook_Music_Bot.py", "RaidBook_TTS_Bot.py",
-                                                                        "RaidBook_Watchdog.py", "RaidBook_Watchdog_GUI.py"):
+        if f.startswith("RaidBook_") and f.endswith(".py") and f != "RaidBook_perms.py":
             with open(os.path.join(ROOT, f), encoding="utf-8") as fh:
                 out[f] = fh.read()
     return out
+
+
+def test_every_other_program_command_is_in_table():
+    srcs = _sources()
+    for f, bot in (("RaidBook_Music_Bot.py", "music"), ("RaidBook_TTS_Bot.py", "tts")):
+        names = set(re.findall(r'@bot\.tree\.command\(name="([^"]+)"', srcs[f]))
+        assert names, f
+        assert names == set(rp.COMMANDS[bot]), (f, names ^ set(rp.COMMANDS[bot]))
+    wd = set(re.findall(r'@_wdog_bot\.command\(name="([^"]+)"', srcs["RaidBook_Watchdog.py"]))
+    assert wd == set(rp.COMMANDS["watchdog"]), wd ^ set(rp.COMMANDS["watchdog"])
+    assert "@_wdog_bot.check" in srcs["RaidBook_Watchdog.py"]
+    for f, bot in (("RaidBook_boss_Bot.py", "boss"), ("RaidBook_Music_Bot.py", "music"), ("RaidBook_TTS_Bot.py", "tts")):
+        assert f'command_gate("{bot}")' in srcs[f], f"{f} 명령 입구 없음"
 
 
 def test_every_boss_command_is_in_table():
@@ -127,17 +148,15 @@ def test_every_boss_command_is_in_table():
     names = set(re.findall(r'@bot\.tree\.command\(name="([^"]+)"', src))
     for m in re.finditer(r'@bot\.hybrid_command\((?:name="([^"]+)")?[^\n]*\n(?:@[^\n]*\n)*async def (\w+)', src):
         names.add(m.group(1) or m.group(2))
-    missing = sorted(n for n in names if n not in rp.COMMANDS)
+    missing = sorted(n for n in names if n not in rp.COMMANDS["boss"])
     assert not missing, f"권한 표에 없는 명령: {missing}"
 
 
 def test_every_persistent_button_is_in_table():
     ids = set()
     for f, src in _sources().items():
-        ids |= set(re.findall(r'custom_id="([a-z_:]+)"', src))
-    consts = {"BTN_VOICECHECK": "combat_voicecheck", "BTN_ADD": "combat_attendee_add",
-              "BTN_REMOVE": "combat_attendee_remove", "BTN_END": "combat_end"}
-    ids |= set(consts.values())
+        ids |= set(re.findall(r'custom_id="([^"]+)"', src))
+        ids |= set(re.findall(r'^(?:BTN_\w+|BUTTON_ID|REPLAY_ID) = "([^"]+)"', src, re.M))
     missing = sorted(i for i in ids if i not in rp.COMPONENTS)
     assert not missing, f"권한 표에 없는 버튼: {missing}"
 
@@ -147,7 +166,7 @@ def test_guarded_views():
     import RaidBook_combat_support as cs
     assert issubclass(ba.BoardView, rp.GuardedView) and issubclass(ba.AuctionView, rp.GuardedView)
     assert issubclass(cs.CombatView, rp.GuardedView)
-    assert "[운영진]" in rp.table_text() and "[누구나]" in rp.table_text()
+    assert all(f"[{lv}]" in rp.table_text() for lv in (rp.NONE, rp.STAFF, rp.OWNER))
 
 
 def test_default_level_for_unlisted_buttons():
@@ -172,7 +191,9 @@ def test_every_persistent_view_is_guarded():
     """보스봇 add_view 로 등록하는 상시 View 는 모두 GuardedView 자식, /add·/remove 공개 확인 화면은 운영진."""
     srcs = _sources()
     boss = srcs["RaidBook_boss_Bot.py"]
-    classes = {m.split(".")[-1] for m in re.findall(r"bot\.add_view\(([\w.]+)\(", boss)}
+    classes = set()
+    for src in srcs.values():
+        classes |= {m.split(".")[-1] for m in re.findall(r"bot\.add_view\(([\w.]+)\(", src)}
     assert classes, "add_view 를 못 찾음"
     allsrc = "\n".join(srcs.values())
     for c in classes:
