@@ -4,12 +4,7 @@
   "extra_tokens": [],
   "_extra_tokens_comment": "동시 재생용 추가 음악 봇 토큰 목록. 넣은 개수만큼의 음성채널에서 따로 재생 (토큰이 있으면 보스봇은 음성에 들어가지 않고 명령만 받음, 비우면 보스봇이 재생). 봇마다 디스코드 앱을 따로 만들어 서버에 초대해야 함. 고친 뒤 Music Bot 재시작",
   "base_dir": "",
-  "command_channel_ids": [
-    1565041141890547813
-  ],
-  "_command_channel_ids_comment": "음악 명령을 받을 채널 ID 목록. 비우면 모든 채널에서 사용 가능",
-  "allow_voice_chat": true,
-  "_allow_voice_chat_comment": "true면 위 채널 말고도 음성채널 채팅에서 음악 명령 사용 가능 (재생 패널은 /재생을 입력한 채널에 올라감)",
+  "_command_channel_comment": "음악 명령은 음성채널 채팅에서만 써요 (재생 패널은 /재생을 입력한 음성채널 채팅에 올라감)",
   "control_role_ids": [],
   "_control_role_ids_comment": "봇과 같은 음성채널에 없어도 건너뛰기/정지/볼륨을 할 수 있는 역할 ID (서버 관리 권한자는 항상 가능)",
   "youtube_only": true,

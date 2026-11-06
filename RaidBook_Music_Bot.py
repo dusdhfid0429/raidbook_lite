@@ -115,20 +115,7 @@ def _int_set(values) -> set:
     return out
 
 
-# v1.0.17 설치본이 만든 예전 기본 채널 → 새 기본 채널로 1회 교체
-_OLD_DEFAULT_CHANNEL, _NEW_DEFAULT_CHANNEL = 1565039317695467561, 1565041141890547813
-if [str(c) for c in config.get("command_channel_ids") or []] == [str(_OLD_DEFAULT_CHANNEL)]:
-    config["command_channel_ids"] = [_NEW_DEFAULT_CHANNEL]
-    try:
-        write_json_atomic(CONFIG_PATH, config)
-        log.info(f"[설정] 음악 명령 채널 → {_NEW_DEFAULT_CHANNEL}")
-    except Exception as e:
-        log.warning(f"[설정] 음악 명령 채널 저장 실패 (이번 실행만 적용): {e}")
-
-# 비어 있으면 모든 채널에서 명령 허용
-COMMAND_CHANNEL_IDS = _int_set(config.get("command_channel_ids"))
-# 음성채널 채팅에서도 음악 명령 허용 (여러 채널 동시 재생용, 동훈님 요청 2026-11-04)
-ALLOW_VOICE_CHAT = bool(config.get("allow_voice_chat", True))
+# 음악 명령은 음성채널 채팅에서만 — 따로 쓰던 음악 명령 채널(command_channel_ids)은 없앰 (2026-11-06 동훈님)
 # 같은 음성채널에 없어도 건너뛰기/정지 등을 할 수 있는 역할 (서버 관리 권한자는 항상 가능)
 CONTROL_ROLE_IDS = _int_set(config.get("control_role_ids"))
 DEFAULT_VOLUME = max(1, min(100, int(config.get("default_volume", 50) or 50)))
@@ -542,13 +529,9 @@ async def _check_channel(interaction: discord.Interaction) -> bool:
     if interaction.guild is None:
         await interaction.response.send_message("서버 채널에서만 사용할 수 있습니다.", ephemeral=True)
         return False
-    if not COMMAND_CHANNEL_IDS or interaction.channel_id in COMMAND_CHANNEL_IDS:
+    if isinstance(interaction.channel, (discord.VoiceChannel, discord.StageChannel)):
         return True
-    if ALLOW_VOICE_CHAT and isinstance(interaction.channel, (discord.VoiceChannel, discord.StageChannel)):
-        return True
-    mentions = " ".join(f"<#{c}>" for c in COMMAND_CHANNEL_IDS)
-    where = f"{mentions} 또는 음성채널 채팅" if ALLOW_VOICE_CHAT else mentions
-    await interaction.response.send_message(f"음악 명령은 {where}에서 사용해 주세요.", ephemeral=True)
+    await interaction.response.send_message("음악 명령은 음성채널 채팅에서 사용해 주세요.", ephemeral=True)
     return False
 
 
