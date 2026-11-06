@@ -30,6 +30,7 @@ from RaidBook_storage import (
     save_workbook_safely_sync as _save_workbook_safely_sync,
     write_json_atomic,
 )
+from RaidBook_common import start_loop_stall_monitor
 from RaidBook_ipc import send_ipc, write_json_response
 from RaidBook_images import normalized_image_file_args, parse_canvas_size
 import RaidBook_schedule as rb_schedule
@@ -990,44 +991,74 @@ def load_expired_message_bundle(message_id):
     return result
 
 
+def _warm_attend_mirror():
+    """저장 직후(작업 스레드에서) JSON 미러를 새로 만들어 둔다 — 다음 버튼 클릭이 통합문서 재읽기를 떠안지 않게."""
+    try:
+        from RaidBook_boss_data import _mirror as _bd_mirror
+        m = _bd_mirror(EXCEL_PATH, system_sheets=SYSTEM_SHEETS)
+        if m is not None:
+            m.ensure_fresh()
+    except Exception as e:
+        log.info(f"[미러 갱신 실패] {type(e).__name__}: {e}")
+
+
+def _attend_mirror_fresh() -> bool:
+    try:
+        from RaidBook_boss_data import _mirror as _bd_mirror
+        m = _bd_mirror(EXCEL_PATH, system_sheets=SYSTEM_SHEETS)
+        return m is not None and m.is_fresh()
+    except Exception:
+        return False
+
+
+def _save_boss_loot_sync(message_id, boss_name, boss_time, loot_text, editor, announcement_msg_id, acquirers):
+    """획득 아이템 저장 본체 (스레드에서 실행 — 통합문서 로드·저장이 수 초 걸려도 봇은 멈추지 않는다)."""
+    if not os.path.exists(EXCEL_PATH):
+        wb = openpyxl.Workbook()
+        # 기본 시트 제거
+        default = wb.active
+        wb.remove(default)
+    else:
+        wb = load_workbook(EXCEL_PATH)
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    existing_ann = _upsert_loot_record_core(
+        wb,
+        message_id,
+        boss_name,
+        boss_time,
+        loot_text,
+        editor,
+        announcement_msg_id=announcement_msg_id,
+        now_str=now_str,
+        acquirers=acquirers,
+        loot_sheet=LOOT_SHEET,
+        loot_headers=LOOT_HEADERS,
+        apply_header=apply_header,
+    )
+    ws = wb[LOOT_SHEET]
+
+    apply_border_all(ws)
+    auto_column_width(ws)
+    reorder_sheets(wb)
+
+    save_ok, last_err = save_workbook_safely_sync(wb, EXCEL_PATH, "보스 데이터")
+    if save_ok:
+        backup_excel()
+        _warm_attend_mirror()
+    return save_ok, last_err, existing_ann
+
+
 async def save_boss_loot_to_excel(message_id, boss_name, boss_time, loot_text, editor, announcement_msg_id=None, acquirers=None):
     """획득 아이템 시트에 한 줄 upsert (메시지 ID 기준).
     announcement_msg_id 가 None 이면 기존 값 보존, 값이 주어지면 갱신.
     반환: (성공 여부, 기존 announcement_msg_id) — 호출자가 새로 게시할지 수정할지 판단 용도."""
     async with excel_lock:
         try:
-            if not os.path.exists(EXCEL_PATH):
-                wb = openpyxl.Workbook()
-                # 기본 시트 제거
-                default = wb.active
-                wb.remove(default)
-            else:
-                wb = load_workbook(EXCEL_PATH)
-
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            existing_ann = _upsert_loot_record_core(
-                wb,
-                message_id,
-                boss_name,
-                boss_time,
-                loot_text,
-                editor,
-                announcement_msg_id=announcement_msg_id,
-                now_str=now_str,
-                acquirers=acquirers,
-                loot_sheet=LOOT_SHEET,
-                loot_headers=LOOT_HEADERS,
-                apply_header=apply_header,
-            )
-            ws = wb[LOOT_SHEET]
-
-            apply_border_all(ws)
-            auto_column_width(ws)
-            reorder_sheets(wb)
-
-            save_ok, last_err = await save_workbook_safely(wb, EXCEL_PATH, "보스 데이터")
+            save_ok, last_err, existing_ann = await asyncio.to_thread(
+                _save_boss_loot_sync, message_id, boss_name, boss_time, loot_text, editor,
+                announcement_msg_id, acquirers)
             if save_ok:
-                backup_excel()
                 log.info(f"[획득아이템 저장] {boss_name} {boss_time} | 메시지 {message_id} | 편집자: {editor} | 아이템: {loot_text[:60]}")
                 return True, existing_ann
             else:
@@ -1038,43 +1069,53 @@ async def save_boss_loot_to_excel(message_id, boss_name, boss_time, loot_text, e
             return False, ""
 
 
+def _save_boss_attendees_sync(message_id, boss_name, boss_time, attendees, today, prune):
+    """참석자 저장 본체 (스레드에서 실행). 통합문서 전체 로드 + 통계 시트 재계산 + 저장 + 백업이
+    수 초 걸리는데, 예전엔 이벤트 루프에서 돌아 그동안 모든 버튼 응답이 멈췄다."""
+    wb = openpyxl.Workbook() if not os.path.exists(EXCEL_PATH) else load_workbook(EXCEL_PATH)
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    mapping = _load_id_to_name_mapping()  # {uid: name}
+    ws = _upsert_attendance_records_core(
+        wb,
+        today,
+        message_id,
+        boss_name,
+        boss_time,
+        attendees,
+        id_to_name=mapping,
+        calculate_points=calculate_points,
+        raw_headers=RAW_HEADERS,
+        apply_header=apply_header,
+        now_str=now_str,
+        prune=prune,
+    )
+
+    apply_border_all(ws)
+    auto_column_width(ws)
+
+    update_history_sheet(wb)
+    update_boss_attendance_sheet(wb)
+    update_stats_sheet(wb)
+    reorder_sheets(wb)
+
+    save_ok, last_err = save_workbook_safely_sync(wb, EXCEL_PATH, "보스 데이터")
+    if save_ok:
+        # (B) 성공 시점에만 백업해 백업 풀이 항상 유효 상태로 유지
+        backup_excel()
+        _warm_attend_mirror()
+    return save_ok, last_err
+
+
 async def save_boss_attendees_to_excel(message_id, boss_name, boss_time, attendees, created_date=None, *, prune=False):
     """마감 시 참석자 목록을 한 번에 Excel에 저장.
     prune=True: 목록에 없는 이 알림의 기존 참석 행 삭제 (취소·인원체크 제외 반영, 저장 전 롤링 백업 유지)"""
     async with excel_lock:
         today = created_date or datetime.now().strftime("%Y-%m-%d")
         try:
-            wb = openpyxl.Workbook() if not os.path.exists(EXCEL_PATH) else load_workbook(EXCEL_PATH)
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            mapping = _load_id_to_name_mapping()  # {uid: name}
-            ws = _upsert_attendance_records_core(
-                wb,
-                today,
-                message_id,
-                boss_name,
-                boss_time,
-                attendees,
-                id_to_name=mapping,
-                calculate_points=calculate_points,
-                raw_headers=RAW_HEADERS,
-                apply_header=apply_header,
-                now_str=now_str,
-                prune=prune,
-            )
-
-            apply_border_all(ws)
-            auto_column_width(ws)
-
-            update_history_sheet(wb)
-            update_boss_attendance_sheet(wb)
-            update_stats_sheet(wb)
-            reorder_sheets(wb)
-
-            save_ok, last_err = await save_workbook_safely(wb, EXCEL_PATH, "보스 데이터")
+            save_ok, last_err = await asyncio.to_thread(
+                _save_boss_attendees_sync, message_id, boss_name, boss_time, list(attendees), today, prune)
 
             if save_ok:
-                # (B) 성공 시점에만 백업해 백업 풀이 항상 유효 상태로 유지
-                backup_excel()
                 log.info(f"[마감 저장] {boss_name} {boss_time} | 참석자: {', '.join(attendees) if attendees else '없음'}")
             else:
                 # (C) 최종 실패 시 디스코드 알림 — restore_backup은 호출하지 않음 (디스크 파일은 미변경)
@@ -2038,15 +2079,17 @@ class AttendView(ui.View):
         self.image_filename = ""  # attachment:// 재참조용 파일명
         self.loot_announcement_id = ""  # 득템 채널 공지 메시지 ID
         self.loot_acquirers = ""  # 획득자 (쉼표 구분 문자열)
-        self.boss_name = boss_name or load_boss_name_from_excel(message_id) or ""
-        self.attendees = load_attendees_from_excel(message_id) if message_id else []
-        self.boss_time = boss_time or load_boss_time_from_excel(message_id) or datetime.now().strftime("%H:%M")
+        # message_id가 있으면 Excel(JSON 미러)에서 한 번만 읽는다 — 예전엔 항목마다 통합문서를
+        # 통째로 다시 열어(5회) 마감·복구 때마다 봇 전체가 수 초씩 멈췄다
+        bundle = load_expired_message_bundle(message_id) if message_id else {}
+        self.boss_name = boss_name or bundle.get("boss_name") or ""
+        self.attendees = list(bundle.get("attendees") or [])
+        self.boss_time = boss_time or bundle.get("boss_time") or datetime.now().strftime("%H:%M")
         self.created_date = created_date or datetime.now().strftime("%Y-%m-%d")
         if loot is None and message_id:
-            loaded_loot, _, loaded_ann = load_loot_from_excel(message_id)
-            self.loot = loaded_loot
-            self.loot_announcement_id = loaded_ann or ""
-            self.loot_acquirers = load_loot_acquirers_from_excel(message_id) or ""
+            self.loot = bundle.get("loot") or ""
+            self.loot_announcement_id = bundle.get("loot_announcement_id") or ""
+            self.loot_acquirers = bundle.get("loot_acquirers") or ""
         else:
             self.loot = loot or ""
         self.expired = expired
@@ -2121,7 +2164,7 @@ class AttendView(ui.View):
         # 다른 경로(음성 인원체크 등)에서 갱신된 참석자/득템 반영 후 로그 기반 검증
         if self.message_id:
             self._load_latest_from_json(self.message_id)
-        verified_attendees = self._verify_attendees_from_log()
+        verified_attendees = await asyncio.to_thread(self._verify_attendees_from_log)
         self.attendees = verified_attendees
         self.apply_phase(True)   # 획득 아이템·경매생성은 마감 후에도 그대로
 
@@ -2348,6 +2391,11 @@ class AttendView(ui.View):
                                       countdown_text=countdown_text,
                                       loot_acquirers=getattr(self, "loot_acquirers", ""),
                                       **image_kwargs, **confirmed_kwargs, attendee_ids=self.attendees)
+            # 확인 문구를 먼저 — 메시지 수정은 같은 채널 수정 속도 제한에 걸려 몰리면 늦어질 수 있다
+            try:
+                await interaction.followup.send(ack_msg, ephemeral=True)
+            except Exception:
+                pass
             try:
                 await _edit_message_with_image(
                     interaction.message,
@@ -2356,10 +2404,6 @@ class AttendView(ui.View):
                     image_file=image_file,
                     content=_boss_alert_content(self.boss_name, self.boss_time, expired=getattr(self, "expired", False)),
                 )
-            except Exception:
-                pass
-            try:
-                await interaction.followup.send(ack_msg, ephemeral=True)
             except Exception:
                 pass
 
@@ -2418,6 +2462,11 @@ class AttendView(ui.View):
                                       countdown_text=countdown_text,
                                       loot_acquirers=getattr(self, "loot_acquirers", ""),
                                       **image_kwargs, **confirmed_kwargs, attendee_ids=self.attendees)
+            # 확인 문구를 먼저 — 메시지 수정은 같은 채널 수정 속도 제한에 걸려 몰리면 늦어질 수 있다
+            try:
+                await interaction.followup.send(ack_msg, ephemeral=True)
+            except Exception:
+                pass
             try:
                 await _edit_message_with_image(
                     interaction.message,
@@ -2426,10 +2475,6 @@ class AttendView(ui.View):
                     image_file=image_file,
                     content=_boss_alert_content(self.boss_name, self.boss_time, expired=getattr(self, "expired", False)),
                 )
-            except Exception:
-                pass
-            try:
-                await interaction.followup.send(ack_msg, ephemeral=True)
             except Exception:
                 pass
 
@@ -2514,9 +2559,13 @@ class AttendView(ui.View):
             self.loot_announcement_id = info.get("loot_announcement_id", "") or self.loot_announcement_id
             self.expired = False
         else:
-            await interaction.response.defer(ephemeral=True)
-            deferred = True
-            bundle = await asyncio.to_thread(load_expired_message_bundle, msg_id)
+            if _attend_mirror_fresh():
+                # 미러가 최신이면 조회가 몇 ms라 바로 입력창을 띄운다 ("입력창 열기" 한 번 더 누르지 않게)
+                bundle = load_expired_message_bundle(msg_id)
+            else:
+                await interaction.response.defer(ephemeral=True)
+                deferred = True
+                bundle = await asyncio.to_thread(load_expired_message_bundle, msg_id)
             self.attendees = bundle["attendees"]
             self.boss_name = bundle["boss_name"] or self.boss_name
             self.boss_time = bundle["boss_time"] or self.boss_time
@@ -3442,7 +3491,8 @@ async def _close_alert(message_id, *, reason="자동 마감", view=None, message
                 log.info(f"[{reason}] {key} 메시지/채널 없음 → 활성 목록에서 제거")
                 return None
         if view is None:
-            view = AttendView(message_id=int(key), boss_name=info.get("boss_name", ""),
+            # message_id 없이 만들어 Excel 조회를 건너뛴다 (값은 모두 JSON에 있음, message_id는 아래에서 지정)
+            view = AttendView(boss_name=info.get("boss_name", ""),
                               boss_time=info.get("boss_time", ""), created_date=info.get("created_date"),
                               loot=info.get("loot", "") or "", disable_time=info.get("disable_time") or None)
             view.attendees = list(info.get("attendees", []))
@@ -4238,7 +4288,8 @@ async def refresh(ctx):
         # 로그 기반 데이터 검증
         verified = 0
         try:
-            verified = verify_and_fix_from_logs()
+            async with excel_lock:   # 스레드 저장과 겹치지 않게 + 검증 중에도 봇이 응답하도록 스레드에서
+                verified = await asyncio.to_thread(verify_and_fix_from_logs)
         except Exception as e:
             log.info(f"[로그 검증 오류] {e}")
             await ctx.send(f"⚠️ 로그 검증 중 오류가 발생했어요: {e}")
@@ -4371,51 +4422,62 @@ def _find_boss_record(boss_name, sheet_name, target_time):
     return best  # (msg_id, boss_time, sheet_name, attendees)
 
 
+def _apply_attendee_edits_excel_sync(action, msg_id, boss_name, boss_time, sheet_name, targets, current_attendees):
+    """수동 추가/제거의 Excel 반영 본체 (스레드에서 실행). 실패 시 오류 문구, 성공 시 None."""
+    wb = load_workbook(EXCEL_PATH)
+    ws = wb[sheet_name] if sheet_name in wb.sheetnames else None
+    if ws is None:
+        return "❌ 시트를 찾을 수 없어요."
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    total = len(current_attendees)
+    for attendee_uid, attendee_display in targets:
+        if action == "add":
+            next_row = ws.max_row + 1
+            ws.cell(row=next_row, column=1, value=msg_id).number_format = "@"
+            ws.cell(row=next_row, column=2, value=boss_name)
+            ws.cell(row=next_row, column=3, value=boss_time)
+            ws.cell(row=next_row, column=4, value=attendee_uid)   # col4 = UID
+            ws.cell(row=next_row, column=5, value=now_str)
+            ws.cell(row=next_row, column=6, value=attendee_display)  # col6 = 이름
+            total += 1
+            log.info(rb_att.attend_log_line("참석", f"{boss_name} {boss_time}",
+                                            msg_id, attendee_display, attendee_uid, total))
+        else:  # remove
+            for row_idx in range(ws.max_row, 1, -1):
+                row_data = [ws.cell(row=row_idx, column=c).value for c in range(1, 7)]
+                if str(row_data[0]) == msg_id and str(row_data[3]) == str(attendee_uid):
+                    ws.delete_rows(row_idx)
+                    break
+            total = max(0, total - 1)
+            log.info(rb_att.attend_log_line("취소", f"{boss_name} {boss_time}",
+                                            msg_id, attendee_display, attendee_uid, total))
+
+    apply_border_all(ws)
+    auto_column_width(ws)
+    update_history_sheet(wb)
+    update_boss_attendance_sheet(wb)
+    update_stats_sheet(wb)
+    reorder_sheets(wb)
+    save_ok, save_err = save_workbook_safely_sync(wb, EXCEL_PATH, "보스 데이터")
+    if not save_ok:
+        return f"❌ 저장 실패: {save_err}"
+    backup_excel()
+    _warm_attend_mirror()
+    return None
+
+
 async def _apply_attendee_edits(action, msg_id, boss_name, boss_time, sheet_name, targets, current_attendees):
     """보스 기록 참석자 수동 추가/제거 — Excel·active_messages.json·알림 embed를 함께 맞춘다.
     targets: [(uid, 표시이름), ...]. 성공 시 None, 실패 시 사용자에게 보여 줄 오류 문구."""
     msg_id = str(msg_id)
     async with excel_lock:
-        wb = load_workbook(EXCEL_PATH)
-        ws = wb[sheet_name] if sheet_name in wb.sheetnames else None
-        if ws is None:
-            return "❌ 시트를 찾을 수 없어요."
-
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        total = len(current_attendees)
-        for attendee_uid, attendee_display in targets:
-            if action == "add":
-                next_row = ws.max_row + 1
-                ws.cell(row=next_row, column=1, value=msg_id).number_format = "@"
-                ws.cell(row=next_row, column=2, value=boss_name)
-                ws.cell(row=next_row, column=3, value=boss_time)
-                ws.cell(row=next_row, column=4, value=attendee_uid)   # col4 = UID
-                ws.cell(row=next_row, column=5, value=now_str)
-                ws.cell(row=next_row, column=6, value=attendee_display)  # col6 = 이름
-                total += 1
-                log.info(rb_att.attend_log_line("참석", f"{boss_name} {boss_time}",
-                                                msg_id, attendee_display, attendee_uid, total))
-            else:  # remove
-                for row_idx in range(ws.max_row, 1, -1):
-                    row_data = [ws.cell(row=row_idx, column=c).value for c in range(1, 7)]
-                    if str(row_data[0]) == msg_id and str(row_data[3]) == str(attendee_uid):
-                        ws.delete_rows(row_idx)
-                        break
-                total = max(0, total - 1)
-                log.info(rb_att.attend_log_line("취소", f"{boss_name} {boss_time}",
-                                                msg_id, attendee_display, attendee_uid, total))
-
-        apply_border_all(ws)
-        auto_column_width(ws)
-        update_history_sheet(wb)
-        update_boss_attendance_sheet(wb)
-        update_stats_sheet(wb)
-        reorder_sheets(wb)
-        save_ok, save_err = await save_workbook_safely(wb, EXCEL_PATH, "보스 데이터")
-        if not save_ok:
-            return f"❌ 저장 실패: {save_err}"
-        backup_excel()
+        err = await asyncio.to_thread(
+            _apply_attendee_edits_excel_sync, action, msg_id, boss_name, boss_time,
+            sheet_name, list(targets), list(current_attendees))
+        if err:
+            return err
 
     # ── active_messages.json 동기화 ──────────────────────────────────
     # 수동 추가/삭제 후 JSON이 구버전이면 이후 버튼 클릭 시 덮어씌워지는 문제 방지
@@ -4449,7 +4511,7 @@ async def _apply_attendee_edits(action, msg_id, boss_name, boss_time, sheet_name
 
         # 참석자 목록: JSON 동기화 결과 우선, 없으면 Excel에서 재조회
         if updated_attendees is None:
-            updated_attendees = [str(u) for u in load_attendees_from_excel(int(msg_id))]
+            updated_attendees = [str(u) for u in await asyncio.to_thread(load_attendees_from_excel, int(msg_id))]
 
         id_to_name = _load_id_to_name_mapping()
         names = ", ".join(id_to_name.get(u, u) for u in updated_attendees) if updated_attendees else "없음"
@@ -4459,13 +4521,14 @@ async def _apply_attendee_edits(action, msg_id, boss_name, boss_time, sheet_name
         disable_time = None
         if msg_info:
             loot_text = msg_info.get("loot", "") or ""
-            loot_acq = msg_info.get("loot_acquirers", "") or load_loot_acquirers_from_excel(int(msg_id)) or ""
+            loot_acq = (msg_info.get("loot_acquirers", "")
+                        or await asyncio.to_thread(load_loot_acquirers_from_excel, int(msg_id)) or "")
             disable_time = _coerce_disable_time(msg_info.get("disable_time"))
             image_url = msg_info.get("image_url", "") or ""
             image_filename = msg_info.get("image_filename", "") or ""
         else:
-            loot_text, _, _ = load_loot_from_excel(int(msg_id))
-            loot_acq = load_loot_acquirers_from_excel(int(msg_id)) or ""
+            loot_text, _, _ = await asyncio.to_thread(load_loot_from_excel, int(msg_id))
+            loot_acq = await asyncio.to_thread(load_loot_acquirers_from_excel, int(msg_id)) or ""
             image_url = ""
             image_filename = ""
 
@@ -5909,7 +5972,8 @@ async def daily_refresh():
         # 2단계: 로그 기반 누락 참석자 보강 (Excel 축소 금지)
         verified = 0
         try:
-            verified = verify_and_fix_from_logs()
+            async with excel_lock:   # 스레드 저장과 겹치지 않게 + 검증 중에도 봇이 응답하도록 스레드에서
+                verified = await asyncio.to_thread(verify_and_fix_from_logs)
             if verified > 0:
                 log.info(f"[로그 검증] {verified}건 데이터 보정 완료")
         except Exception as e:
@@ -6062,10 +6126,25 @@ async def _ensure_boss_channels():
 
 
 _auction_watch_task = None
+_stall_monitor_task = None
+
+
+@bot.listen("on_interaction")
+async def _log_slow_interaction(interaction: discord.Interaction):
+    """버튼·명령이 봇에 늦게 도착(또는 봇이 늦게 집어 듦)한 경우만 기록 — 응답 지연 진단용."""
+    try:
+        lag = (discord.utils.utcnow() - interaction.created_at).total_seconds()
+        if lag >= 1.0:
+            cid = (interaction.data or {}).get("custom_id") or (interaction.data or {}).get("name") or ""
+            log.info(f"[응답 지연] 클릭 후 {lag:.1f}초 뒤 처리 시작 | {cid} | user:{interaction.user.id}")
+    except Exception:
+        pass
 
 
 async def initialize_on_ready():
-    global daily_refresh_task
+    global daily_refresh_task, _stall_monitor_task
+    if _stall_monitor_task is None:
+        _stall_monitor_task = start_loop_stall_monitor(log)
     channel_notes = await _ensure_boss_channels() if AUTO_CREATE_CHANNELS else []
     _auto_migrate_user_mapping()
     bot.add_view(AttendView(persistent=True))

@@ -100,6 +100,12 @@ class AttendMirror:
         except OSError:
             return None
 
+    def is_fresh(self) -> bool:
+        """재가져오기 없이 바로 읽을 수 있는지 (xlsx mtime이 미러와 같음)."""
+        data = self._store.read()
+        mtime = self._source_mtime()
+        return data.get("source_mtime") == mtime and bool(data.get("sheets") or mtime is None)
+
     def ensure_fresh(self) -> dict:
         """xlsx가 바뀌었으면 재가져오기 후 데이터 반환."""
         data = self._store.read()

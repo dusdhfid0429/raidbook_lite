@@ -27,6 +27,7 @@ python Tests/test_tts.py
 python Tests/test_clans.py
 python Tests/test_combat_support.py
 python Tests/test_broadcast.py
+python Tests/test_responsiveness.py   # 엑셀 저장이 버튼 응답(이벤트 루프)을 멈추지 않는지
 python -m pyflakes *.py
 ```
 

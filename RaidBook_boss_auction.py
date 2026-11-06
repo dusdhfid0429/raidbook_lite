@@ -38,6 +38,8 @@ from RaidBook_ipc import send_ipc
 CLOSE_GRACE_SEC = 0.8   # 마감 직전 클릭의 네트워크·처리 지연 허용 (판정은 클릭 시각 기준)
 REFRESH_DELAY_SEC = 0.3   # 잠금이 없을 때 최종 상태로 다시 그리기까지 최소 대기
 TICK_SEC = 1.0            # 진행 중 남은 시간 다시 그리는 간격
+TICK_SLOW_SEC = 2.0       # 남은 시간이 넉넉할 때 다시 그리는 간격 (채널 수정 속도 제한 여유 확보)
+TICK_FAST_WITHIN = 10.0   # 마감 이만큼(초) 전부터는 TICK_SEC(1초)마다
 
 AMOUNT_HINT = "숫자 또는 단위 표기 (예: 80만, 1.5억, 120만5천, 3,750,000)"
 
@@ -516,6 +518,7 @@ class BossAuction:
 
         async def _run():
             msg = None
+            last_edit = 0.0
             try:
                 while True:
                     await asyncio.sleep(TICK_SEC)
@@ -532,6 +535,13 @@ class BossAuction:
                     pending = self._refresh_tasks.get(key)
                     if pending and not pending.done():
                         continue   # 입찰 직후 최종 갱신이 곧 그린다
+                    # 마지막 TICK_FAST_WITHIN초만 1초마다, 그 전엔 TICK_SLOW_SEC마다 — 채널 메시지 수정 속도 제한
+                    # (5초에 5번)을 카운트가 다 써 버려 다른 버튼 화면 갱신이 줄 서는 일을 막는다
+                    now_mono = time.monotonic()
+                    if (dl - self.discord_now() > TICK_FAST_WITHIN
+                            and now_mono - last_edit < TICK_SLOW_SEC):
+                        continue
+                    last_edit = now_mono
                     if msg is None:
                         cid = int(latest.get("channel_id") or self.channel_id or 0)
                         ch = self.bot.get_channel(cid) or await self.bot.fetch_channel(cid)

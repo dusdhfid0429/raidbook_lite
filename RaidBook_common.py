@@ -241,3 +241,47 @@ def write_json_atomic(path, data, logger=None, *, ensure_ascii=False, indent=2):
         except OSError:
             pass
         raise
+
+
+def start_loop_stall_monitor(logger, *, threshold=1.0, interval=0.25):
+    """이벤트 루프가 threshold초 넘게 멈추면 그때 루프가 붙잡고 있던 코드 위치를 로그로 남긴다.
+
+    버튼 응답이 늦을 때 원인(동기 파일 I/O 등)을 바로 찾을 수 있게 하는 진단용. 실행 중인 루프에서 호출.
+    반환: 하트비트 asyncio.Task (보관만 하면 됨).
+    """
+    import sys
+    import threading
+    import traceback
+
+    loop = asyncio.get_running_loop()
+    loop_thread_id = threading.get_ident()
+    state = {"beat": time.monotonic()}
+
+    async def _heartbeat():
+        while True:
+            state["beat"] = time.monotonic()
+            await asyncio.sleep(interval)
+
+    def _watch():
+        reported = None   # 이번 멈춤에서 이미 기록한 하트비트 시각
+        while not loop.is_closed():
+            time.sleep(interval)
+            beat = state["beat"]
+            stalled = time.monotonic() - beat
+            if stalled >= threshold and reported != beat:
+                reported = beat
+                frame = sys._current_frames().get(loop_thread_id)
+                where = ""
+                if frame is not None:
+                    stack = traceback.extract_stack(frame)
+                    where = " | ".join(f"{os.path.basename(f.filename)}:{f.lineno} {f.name}"
+                                       for f in stack[-6:])
+                try:
+                    logger.info(f"[응답 지연] 봇이 {stalled:.1f}초째 멈춤 — {where}")
+                except Exception:
+                    pass
+            elif reported == beat and stalled < threshold:
+                reported = None
+
+    threading.Thread(target=_watch, name="loop-stall-monitor", daemon=True).start()
+    return asyncio.ensure_future(_heartbeat())
