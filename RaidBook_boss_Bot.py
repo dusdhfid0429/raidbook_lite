@@ -6241,7 +6241,7 @@ async def voicecheck(ctx, message_id: str = None):
 
 @bot.hybrid_command(name="인원현황", aliases=["headcount"])
 async def headcount(ctx):
-    """명령을 입력한 음성채널의 현재 인원을 혈맹별 숫자로 그 채널 채팅에 표시 (보스 알림은 건드리지 않음)."""
+    """명령을 입력한 음성채널의 현재 인원을 혈맹별 명단(닉네임)으로 그 채널 채팅에 표시 (보스 알림은 건드리지 않음)."""
     async def deny(text):
         await ctx.send(text, ephemeral=True)
 
@@ -6252,19 +6252,24 @@ async def headcount(ctx):
         await deny("❌ 음성채널 채팅에서 입력하거나, 음성채널에 접속한 상태로 사용해 주세요.")
         return
     members = _collect_voice_members(vc.guild, vc)
-    groups, unassigned = None, []
+    groups, unassigned = None, list(members.values())
     if CLAN_ROLES:
         def roles_of(uid):
             m = vc.guild.get_member(int(uid))
             return {r.name.strip() for r in m.roles} if m is not None else set()
-        groups, unassigned = rb_clans.group_by_clan(list(members), CLAN_ROLES, roles_of)
+        groups, unassigned = rb_clans.group_by_clan(list(members), CLAN_ROLES, roles_of,
+                                                    label_of=members.get)
     text = rb_clans.format_headcount(vc.name, datetime.now().strftime("%H:%M"),
                                      len(members), groups, unassigned)
-    log.info(f"[인원현황] {vc.name}({vc.id}) user:{ctx.author.id} | {text.splitlines()[1:]}")
+    log.info(f"[인원현황] {vc.name}({vc.id}) user:{ctx.author.id} | 총 {len(members)}명")
+    parts = rb_clans.split_message(text)
     if ctx.channel.id == vc.id:
-        await ctx.send(text)
+        await ctx.send(parts[0])
+        for part in parts[1:]:
+            await vc.send(part)
     else:
-        await vc.send(text)
+        for part in parts:
+            await vc.send(part)
         await deny(f"✅ <#{vc.id}> 채팅에 인원현황을 올렸어요.")
 
 
