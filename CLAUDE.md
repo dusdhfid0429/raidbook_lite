@@ -14,6 +14,8 @@ RaidBook Lite — 보스 알림/인원체크/경매만 남긴 경량판. 원본(
 ## 규칙
 - 공개 embed에는 이름·상태만. 금액 상세는 관리자/본인 ephemeral
 - JSON 저장은 `write_json_atomic`, Excel은 `save_workbook_safely(_sync)`
+- 보스 참석/득템 데이터 원본은 JSON(`Data/store/attend/RaidBook_Boss_Data.json`, `RaidBook_store_attend` 원본 모드, 롤링 백업 `Data/Backup/Boss/*.json`). 평소 저장은 JSON만(`_boss_store()`), 엑셀은 /save·/refresh·일일 정리 때 `export_boss_excel_sync`/`_tidy_and_export_sync`로 만들어 PC 파일 최신화·디스코드 전송. 처음 실행 때 기존 엑셀을 한 번 이전. 관리 명령은 `_wb_from_store()`로 통합문서를 만들어 고친 뒤 `_commit_wb()`로 반영
+- 이벤트 루프에서 파일 대량 I/O 금지 — 무거운 작업은 `asyncio.to_thread`. 봇이 1초 넘게 멈추면 로그에 `[응답 지연]`
 - persistent View `custom_id`는 재시작 복구와 충돌 없게 고정
 - 실제 토큰/채널 Config는 Git 제외(`*.template.json`만 커밋)
 
@@ -28,6 +30,8 @@ python Tests/test_tts.py
 python Tests/test_clans.py
 python Tests/test_combat_support.py
 python Tests/test_broadcast.py
+python Tests/test_responsiveness.py   # 저장이 버튼 응답(이벤트 루프)을 멈추지 않는지
+python Tests/test_boss_store.py       # JSON 원본 저장·엑셀 이전/내보내기
 python Tests/test_verify.py
 python Tests/test_verify_perms.py
 python -m pyflakes *.py

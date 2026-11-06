@@ -72,6 +72,17 @@ def ensure_loot_sheet(wb, *, sheet_name=DEFAULT_LOOT_SHEET, headers=None, apply_
     return ws
 
 
+def _has_data(excel_path):
+    """엑셀 파일이 있거나, JSON이 원본인 워크북이면 True (원본 모드에선 엑셀 파일이 없어도 데이터가 있다)."""
+    if os.path.exists(excel_path):
+        return True
+    try:
+        from RaidBook_store_attend import _PRIMARY
+        return os.path.abspath(excel_path) in _PRIMARY
+    except Exception:
+        return False
+
+
 def _mirror(excel_path, *, system_sheets=None, loot_sheet=DEFAULT_LOOT_SHEET):
     """xlsx mtime 기반 JSON 미러 — 실패 시 None 반환하고 호출부는 Excel 직접 읽기로 폴백."""
     try:
@@ -85,7 +96,7 @@ def _mirror(excel_path, *, system_sheets=None, loot_sheet=DEFAULT_LOOT_SHEET):
 
 def load_all_loot(excel_path, *, loot_sheet=DEFAULT_LOOT_SHEET):
     """획득 아이템 시트 전체 {메시지ID: {boss_name, boss_time, loot_text, ...}} (JSON 미러 경유)."""
-    if not os.path.exists(excel_path):
+    if not _has_data(excel_path):
         return {}
     m = _mirror(excel_path, loot_sheet=loot_sheet)
     if m is None:
@@ -98,7 +109,7 @@ def load_all_loot(excel_path, *, loot_sheet=DEFAULT_LOOT_SHEET):
 
 def load_loot_record(excel_path, message_id, *, loot_sheet=DEFAULT_LOOT_SHEET):
     """Return (loot_text, editor, announcement_msg_id) for a boss message ID."""
-    if not os.path.exists(excel_path):
+    if not _has_data(excel_path):
         return "", "", ""
     m = _mirror(excel_path, loot_sheet=loot_sheet)
     if m is not None:
@@ -133,7 +144,7 @@ def load_loot_record(excel_path, message_id, *, loot_sheet=DEFAULT_LOOT_SHEET):
 
 def load_loot_acquirers(excel_path, message_id, *, loot_sheet=DEFAULT_LOOT_SHEET):
     """Return the acquirers text (8번째 컬럼) for a boss/combat message ID. 없으면 ''."""
-    if not os.path.exists(excel_path):
+    if not _has_data(excel_path):
         return ""
     m = _mirror(excel_path, loot_sheet=loot_sheet)
     if m is not None:
@@ -316,7 +327,7 @@ def upsert_attendance_records(
 
 
 def load_attendees_by_message_id(excel_path, message_id, *, system_sheets=None):
-    if not os.path.exists(excel_path):
+    if not _has_data(excel_path):
         return []
     m = _mirror(excel_path, system_sheets=system_sheets)
     if m is not None:
@@ -370,7 +381,7 @@ def find_boss_for_settlement(
     require_loot=True: 획득 아이템이 등록된 기록만 반환
     start_minutes/end_minutes: 하루 안의 분 단위 범위(포함)로 필터링
     """
-    if not os.path.exists(excel_path):
+    if not _has_data(excel_path):
         return None if not return_all else []
     m = _mirror(excel_path, system_sheets=system_sheets)
     if m is not None:
@@ -538,7 +549,7 @@ def _find_boss_for_settlement_mirror(m, sheet_name, target_time, *, system_sheet
 
 
 def find_boss_by_message_id(excel_path, msg_id, *, system_sheets=None):
-    if not os.path.exists(excel_path):
+    if not _has_data(excel_path):
         return None
     m = _mirror(excel_path, system_sheets=system_sheets)
     if m is not None:
