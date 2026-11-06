@@ -101,16 +101,44 @@ def is_staff_role(role_name) -> bool:
 
 
 def format_headcount(channel_name, time_text, total, groups, unassigned) -> str:
-    """/인원현황 메시지 — 숫자만 (명단 없음). 혈맹 구분을 안 쓰면 groups=None.
-    '🎙️ 보탐방 인원현황 · 21:30' / '총 12명' / '⚔️ 정도 5 · 🦸 슈퍼맨 4 · … · ❔ 미지정 2'"""
-    lines = [f"🎙️ **{channel_name}** 인원현황 · {time_text}", f"총 **{total}명**"]
-    if groups is not None:
-        parts = [f"{(emoji + ' ') if emoji else ''}{name} {len(members)}" for name, emoji, members in groups]
+    """/인원현황 메시지 — 혈맹별 '⚔️ 정도 (5명)' 아래 닉네임만 ' · '로 (보스 알림과 같은 short_name).
+    0명 혈맹은 제목 줄만, 미지정은 있을 때만. 혈맹 구분을 안 쓰면 groups=None → 전체 명단 한 줄."""
+    lines = [f"🎙️ **{channel_name}** 인원현황 · {time_text}", f"총 **{total}명**", ""]
+    if groups is None:
         if unassigned:
-            parts.append(f"{UNASSIGNED_LABEL} {len(unassigned)}")
-        if parts:
-            lines.append(" · ".join(parts))
-    return "\n".join(lines)
+            lines.append(NAME_SEP.join(short_name(p) for p in unassigned))
+        return "\n".join(lines).rstrip()
+    clan_names = tuple(name for name, _, _ in groups)
+    cols = [((f"{emoji} {name}" if emoji else name), members) for name, emoji, members in groups]
+    if unassigned:
+        cols.append((UNASSIGNED_LABEL, list(unassigned)))
+    for label, people in cols:
+        lines.append(f"**{label} ({len(people)}명)**")
+        if people:
+            lines.append(NAME_SEP.join(short_name(p, clan_names) for p in people))
+    return "\n".join(lines).rstrip()
+
+
+def split_message(text, limit=2000) -> list:
+    """디스코드 메시지 길이 제한에 맞춰 줄 단위로 나눔 (한 줄이 넘치면 ' · ' 단위로 자름)."""
+    pieces = []
+    for line in text.split("\n"):
+        while len(line) > limit:
+            cut = line.rfind(NAME_SEP, 0, limit)
+            cut = cut if cut > 0 else limit
+            pieces.append(line[:cut])
+            line = line[cut:].lstrip(" ·")
+        pieces.append(line)
+    out, cur = [], ""
+    for line in pieces:
+        if cur and len(cur) + 1 + len(line) > limit:
+            out.append(cur)
+            cur = line
+        else:
+            cur = f"{cur}\n{line}" if cur else line
+    if cur.strip():
+        out.append(cur)
+    return out
 
 
 FIELD_LIMIT = 1024   # 디스코드 embed 필드 값 최대 길이

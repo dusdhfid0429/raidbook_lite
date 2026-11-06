@@ -120,13 +120,25 @@ def test_headcount():
     assert rbc.is_staff_role("운영진") and rbc.is_staff_role("슈퍼맨운영진") and rbc.is_staff_role("썰자운영진 ")
     assert not rbc.is_staff_role("정도") and not rbc.is_staff_role("운영진후보") and not rbc.is_staff_role(None)
     roles = {"1": {"정도"}, "2": {"정도"}, "3": {"슈퍼맨"}, "4": set()}
-    groups, unassigned = rbc.group_by_clan(list(roles), TWO, roles.get)
+    names = {"1": "[정도]투신/기사/90", "2": "빼빼로", "3": "[슈퍼맨]빼쥬 법사 88", "4": "손님"}
+    groups, unassigned = rbc.group_by_clan(list(roles), TWO, roles.get, label_of=names.get)
     assert rbc.format_headcount("보탐방", "21:30", 4, groups, unassigned) == (
-        "🎙️ **보탐방** 인원현황 · 21:30\n총 **4명**\n⚔️ 정도 2 · 🦸 슈퍼맨 1 · ❔ 미지정 1")
-    groups, unassigned = rbc.group_by_clan(["1"], TWO, roles.get)
-    assert rbc.format_headcount("A", "09:00", 1, groups, unassigned).endswith("⚔️ 정도 1 · 🦸 슈퍼맨 0")
+        "🎙️ **보탐방** 인원현황 · 21:30\n총 **4명**\n\n"
+        "**⚔️ 정도 (2명)**\n투신 · 빼빼로\n**🦸 슈퍼맨 (1명)**\n빼쥬\n**❔ 미지정 (1명)**\n손님")
+    groups, unassigned = rbc.group_by_clan(["1"], TWO, roles.get, label_of=names.get)
+    assert rbc.format_headcount("A", "09:00", 1, groups, unassigned).endswith(
+        "**⚔️ 정도 (1명)**\n투신\n**🦸 슈퍼맨 (0명)**")
     assert rbc.format_headcount("A", "09:00", 0, None, []) == "🎙️ **A** 인원현황 · 09:00\n총 **0명**"
+    assert rbc.format_headcount("A", "09:00", 1, None, ["손님"]).endswith("\n\n손님")
 
+
+def test_split_message():
+    text = "제목\n" + " · ".join(f"이름{i:03d}" for i in range(400))
+    parts = rbc.split_message(text, limit=500)
+    assert all(len(p) <= 500 for p in parts) and len(parts) > 1
+    joined = " · ".join(p.replace("제목\n", "") for p in parts)
+    assert joined.split(" · ") == [f"이름{i:03d}" for i in range(400)]
+    assert rbc.split_message("짧음") == ["짧음"]
 
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
