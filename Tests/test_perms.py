@@ -194,9 +194,8 @@ def test_default_level_for_unlisted_buttons():
 
 
 def test_every_persistent_view_is_guarded():
-    """보스봇 add_view 로 등록하는 상시 View 는 모두 GuardedView 자식, /add·/remove 공개 확인 화면은 운영진."""
+    """add_view 로 등록하는 상시 View 는 모두 GuardedView 자식."""
     srcs = _sources()
-    boss = srcs["RaidBook_boss_Bot.py"]
     classes = set()
     for src in srcs.values():
         classes |= {m.split(".")[-1] for m in re.findall(r"bot\.add_view\(([\w.]+)\(", src)}
@@ -204,7 +203,6 @@ def test_every_persistent_view_is_guarded():
     allsrc = "\n".join(srcs.values())
     for c in classes:
         assert re.search(rf"class {c}\(rb_perms\.GuardedView\)", allsrc), f"{c} 가 GuardedView 가 아님"
-    assert re.search(r"class _AttendeeEditView\(rb_perms\.GuardedView\):\n(?:.*\n){0,2}\s+default_level = rb_perms\.STAFF", boss)
 
 
 if __name__ == "__main__":

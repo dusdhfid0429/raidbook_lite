@@ -84,8 +84,6 @@ def test_saves_go_to_json_only_and_export_on_request():
 
     # 조회
     assert b.load_boss_name_from_excel(333) == "보스C" and b.load_boss_time_from_excel(333) == "18:00"
-    assert b.find_message_id_by_datetime("2611021800")[0] == "333"
-    assert b._find_boss_record("보스C", "2026-11-02", "18:05")[0] == "333"
     assert b._find_boss_record_by_id("333")[4] == ["1005"]
 
     # 요청 시 내보내기 → 엑셀 파일 최신화 (통계 시트 포함), 다시 읽어도 같은 데이터

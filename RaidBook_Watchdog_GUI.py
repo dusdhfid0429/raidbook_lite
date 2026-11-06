@@ -1227,7 +1227,7 @@ class WatchdogApp(tk.Tk):
             log.info("  quit                  — Watchdog 종료")
             log.info("[ 봇 IPC 명령어 ]  (! 있어도 없어도 됨)")
             log.info("  boss    [명령어] [인자...]  — Boss Bot에 전달")
-            log.info("  예) boss history 7  /  boss listdailyboss")
+            log.info("  예) boss save  /  boss startdailyboss")
             log.info("  명령어 목록은 봇 행의 📋 버튼으로 확인")
             log.info("=" * 40)
 

@@ -41,9 +41,6 @@ COMMANDS = {
         "전투지원": NONE,
         # 운영진 — 보스탐 운영
         "보스알림": STAFF, "전파": STAFF, "인원체크": STAFF, "인원현황": STAFF,
-        "create": STAFF, "close": STAFF, "activate": STAFF, "extend": STAFF, "reopen": STAFF,
-        "add": STAFF, "remove": STAFF,
-        "listboss": STAFF, "listdailyboss": STAFF, "history": STAFF, "stats": STAFF,
         # 서버마스터 — 프로그램 조작 (스케줄·저장·재시작·데이터 수정·서버 권한)
         "startboss": OWNER, "stopboss": OWNER, "setboss": OWNER,
         "startdailyboss": OWNER, "stopdailyboss": OWNER, "setrefresh": OWNER,

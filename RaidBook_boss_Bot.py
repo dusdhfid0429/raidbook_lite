@@ -187,12 +187,6 @@ def _alias_notes() -> dict:
     """uid_alias.json의 _notes 블록(alias 종류 설명) 반환."""
     return _user_store().alias_notes()
 
-def _resolve_uid(uid) -> str:
-    """uid에 alias가 등록돼 있으면 정규 UID로 치환해 반환.
-    실제 치환이 발생한 alias 매핑은 프로세스당 1회 로그."""
-    return _user_store().resolve_uid(uid)
-
-
 def _auto_migrate_user_mapping():
     """user_mapping.json이 {name: uid} 구형식이면 {uid: name}으로 자동 변환"""
     migrated = _user_store().auto_migrate_mapping()
@@ -1264,50 +1258,6 @@ def load_boss_name_from_excel(message_id):
         if rec.get("msg_id") == target:
             return rec.get("event") or None
     return None
-
-
-def find_message_id_by_datetime(date_time_str):
-    """날짜+시간 문자열(YYMMDDHHMM)로 메시지 ID 검색. 예: 2605161700 → 2026-05-16 시트에서 17:00 검색"""
-    if len(date_time_str) != 10:
-        return None, None, None
-    try:
-        date_str = f"20{date_time_str[:2]}-{date_time_str[2:4]}-{date_time_str[4:6]}"
-        time_str = f"{date_time_str[6:8]}:{date_time_str[8:10]}"
-    except Exception:
-        return None, None, None
-
-    data = _boss_store().ensure_fresh()
-    for rec in (data.get("sheets") or {}).get(date_str, []):
-        if rec.get("event_time") and str(rec["event_time"]) == time_str:
-            return str(rec["msg_id"]), rec.get("event"), rec.get("event_time")
-    return None, None, None
-
-
-def get_history_text(days=7):
-    if not _has_boss_data():
-        return None
-    wb = _wb_from_store()
-    update_history_sheet(wb)
-    if "히스토리" not in wb.sheetnames:
-        return None
-    ws = wb["히스토리"]
-    rows = list(ws.iter_rows(min_row=2, values_only=True))
-    if not rows:
-        return None
-    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    filtered = [r for r in rows if r[0] and str(r[0]) >= cutoff]
-    if not filtered:
-        return None
-    grouped = defaultdict(list)
-    for row in filtered:
-        grouped[row[0]].append(row)
-    text = f"📊 **보스탐 히스토리 (최근 {days}일)**\n"
-    text += "─" * 30 + "\n"
-    for date in sorted(grouped.keys(), reverse=True):
-        text += f"\n📅 **{date}**\n"
-        for row in grouped[date]:
-            text += f"  🐉 {row[1]} | ⏰ {row[2]} | 👥 {row[4]}명 | {row[5]}\n"
-    return text
 
 
 def _coerce_disable_time(value):
@@ -3879,21 +3829,6 @@ async def stopdailyboss(ctx, boss_name: str = None):
 
 
 @bot.hybrid_command()
-async def listdailyboss(ctx):
-    """매일 반복 보스 알림 목록"""
-    if not boss_daily_states:
-        await ctx.send("❌ 실행 중인 daily 알림이 없어요.")
-        return
-    lines = ["📋 **매일 반복 보스 알림**"]
-    for name, time_tasks in boss_daily_states.items():
-        cfg = DAILY_BOSSES_CONFIG.get(name, {})
-        alert_min = cfg.get("alert_minutes", DEFAULT_ALERT_MINUTES)
-        times_str = ", ".join(time_tasks.keys())
-        lines.append(f"  🟢 **{name}** — {times_str} | {alert_min}분 전 알림")
-    await ctx.send("\n".join(lines))
-
-
-@bot.hybrid_command()
 async def startboss(ctx, boss_name: str, time_str: str, interval: float = None):
     """보스 스케줄 시작. 예: /startboss 카스파 13:00 또는 /startboss 카스파 13:00 3"""
     try:
@@ -3976,28 +3911,6 @@ async def setboss(ctx, boss_name: str, hours: float):
 
 
 @bot.hybrid_command()
-async def listboss(ctx):
-    """현재 등록된 보스 스케줄 목록"""
-    lines = []
-    if boss_states:
-        lines.append("**[주기 반복]**")
-        for name, state in boss_states.items():
-            icon = "🟢" if state["task"] and not state["task"].done() else "🔴"
-            lines.append(f"  {icon} **{name}** — {state['interval_hours']}시간 주기")
-    if boss_daily_states:
-        lines.append("**[매일 고정]**")
-        for name, time_tasks in boss_daily_states.items():
-            cfg = DAILY_BOSSES_CONFIG.get(name, {})
-            alert_min = cfg.get("alert_minutes", DEFAULT_ALERT_MINUTES)
-            times_str = ", ".join(time_tasks.keys())
-            lines.append(f"  🟢 **{name}** — {times_str} | {alert_min}분 전 알림")
-    if not lines:
-        await ctx.send("❌ 실행 중인 보스 스케줄이 없어요.")
-        return
-    await ctx.send("📋 **현재 보스 스케줄**\n" + "\n".join(lines))
-
-
-@bot.hybrid_command()
 async def setrefresh(ctx, time_str: str):
     """일일 정리 시각 변경. 예: /setrefresh 00:00"""
     global daily_refresh_hour, daily_refresh_minute, daily_refresh_task
@@ -4013,186 +3926,6 @@ async def setrefresh(ctx, time_str: str):
         await ctx.send(f"✅ 일일 정리 시각을 **{hour:02d}:{minute:02d}**로 변경했습니다!")
     except Exception:
         await ctx.send("❌ 형식이 잘못됐어요! 예: `/setrefresh 00:00`")
-
-
-@bot.hybrid_command()
-async def history(ctx, days: int = 7):
-    text = get_history_text(days)
-    if not text:
-        await ctx.send("❌ 히스토리 데이터가 없어요!")
-        return
-    await ctx.send(text)
-
-
-@bot.hybrid_command(name="stats", aliases=["통계", "참석통계"])
-async def stats(ctx, period: str = "30", top: str = "25"):
-    """참석자별 보스 참석 통계. 예: /stats 30 25 (최근 30일, 상위 25명)
-    /stats all → 전체 기간"""
-    if not _has_boss_data():
-        await ctx.send("❌ 저장된 데이터가 없어요!")
-        return
-
-    # 'all' 처리
-    all_mode = False
-    days = 30
-    raw = str(period).lower().strip()
-    if raw in ("all", "전체", "0"):
-        all_mode = True
-    else:
-        try:
-            days = int(raw)
-        except Exception:
-            await ctx.send("❌ 일수는 숫자 또는 `all` 이어야 해요. 예: `/stats 30` / `/stats all`")
-            return
-    # top: 숫자 또는 'all' (제한 해제). IPC 경유 시 문자열로 들어옴
-    top_all = False
-    top_raw = str(top).lower().strip()
-    if top_raw in ("all", "전체", "0"):
-        top_all = True
-    else:
-        try:
-            top = int(top_raw)
-        except Exception:
-            top = 25
-
-    # JSON 미러 우선 (7단계) — 실패 시 Excel 직접 읽기. 행 튜플 배치는 기존과 동일.
-    rows_by_sheet = None
-    try:
-        from RaidBook_boss_data import _mirror as _bd_mirror
-        m = _bd_mirror(EXCEL_PATH, system_sheets=SYSTEM_SHEETS)
-        if m is not None:
-            rows_by_sheet = {
-                sn: [(r["msg_id"], r.get("event"), None, r.get("uid") or None,
-                      None, r.get("name") or None) for r in recs]
-                for sn, recs in m.iter_sheets(system_sheets=SYSTEM_SHEETS)
-            }
-    except Exception as e:
-        log.info(f"[stats 미러 실패 → Excel 폴백] {e}")
-        rows_by_sheet = None
-    if rows_by_sheet is None:
-        try:
-            wb = load_workbook(EXCEL_PATH, read_only=True)
-        except Exception as e:
-            await ctx.send(f"❌ Excel 로드 실패: {e}")
-            return
-        rows_by_sheet = {
-            s: list(wb[s].iter_rows(min_row=2, values_only=True))
-            for s in wb.sheetnames if s not in SYSTEM_SHEETS
-        }
-        wb.close()
-
-    # 대상 시트 필터 (날짜 시트만, 최근 N일)
-    target_sheets = []
-    if all_mode:
-        target_sheets = list(rows_by_sheet.keys())
-    else:
-        cutoff = datetime.now().date() - timedelta(days=int(days) - 1)
-        for s in rows_by_sheet.keys():
-            try:
-                d = datetime.strptime(s, "%Y-%m-%d").date()
-                if d >= cutoff:
-                    target_sheets.append(s)
-            except Exception:
-                continue
-
-    if not target_sheets:
-        await ctx.send("❌ 대상 기간에 데이터가 없어요!")
-        return
-
-    id_to_name = _load_id_to_name_mapping()
-    counter = defaultdict(int)         # key: uid (alias 적용 후) → count
-    per_boss = defaultdict(lambda: defaultdict(int))
-    total_records = 0
-    alias_merged = 0
-
-    for sheet_name in target_sheets:
-        for row in rows_by_sheet.get(sheet_name, []):
-            if not row or not row[0]:
-                continue
-            boss_name = row[1] if len(row) > 1 else ""
-            uid_val = row[3] if len(row) > 3 else None
-            name_val = row[5] if len(row) > 5 else None
-            key = None
-            if uid_val:
-                original = str(uid_val)
-                key = _resolve_uid(original)   # alias 적용 + 로깅
-                if key != original:
-                    alias_merged += 1
-            elif name_val:
-                key = str(name_val)
-            if not key:
-                continue
-            counter[key] += 1
-            if boss_name:
-                per_boss[key][str(boss_name)] += 1
-            total_records += 1
-
-    if alias_merged > 0:
-        log.info(f"[stats] alias 통합 적용: {alias_merged}건 (동명이인/부계정 통합)")
-
-    if not counter:
-        await ctx.send("❌ 집계할 참석 데이터가 없어요!")
-        return
-
-    sorted_items = sorted(counter.items(), key=lambda x: x[1], reverse=True)
-    if top_all:
-        # 'all' → 제한 해제 (전원)
-        pass
-    else:
-        top_n = max(1, int(top))
-        sorted_items = sorted_items[:top_n]
-    total_listed = len(sorted_items)
-
-    period = "전체 기간" if all_mode else f"최근 {days}일"
-    embed = discord.Embed(
-        title=f"📊 보스 참석 통계 — {period}",
-        description=f"대상 시트: **{len(target_sheets)}일** | 총 참석 기록: **{total_records:,}**건",
-        color=discord.Color.gold(),
-    )
-
-    lines = []
-    for rank, (key, cnt) in enumerate(sorted_items, start=1):
-        # uid → 이름 매핑
-        display = id_to_name.get(key, key)
-        if display == key and key.isdigit():
-            display = f"`{key[:6]}...`"
-        # 가장 많이 참석한 보스 Top 3
-        top_bosses = sorted(per_boss[key].items(), key=lambda x: x[1], reverse=True)[:3]
-        bosses_str = ", ".join(f"{b}({c})" for b, c in top_bosses) if top_bosses else ""
-        line = f"**{rank}.** {display} — **{cnt}회**"
-        if bosses_str:
-            line += f"  ｜ {bosses_str}"
-        lines.append(line)
-
-    # Discord embed description 4096자 제한 → 여러 embed로 페이지 분할 (전원 표시 시)
-    PAGE_LIMIT = 3500
-    pages = []
-    cur_lines = []
-    cur_len = len(embed.description) + 2
-    for line in lines:
-        if cur_len + len(line) + 1 > PAGE_LIMIT and cur_lines:
-            pages.append(cur_lines)
-            cur_lines = [line]
-            cur_len = len(line) + 1
-        else:
-            cur_lines.append(line)
-            cur_len += len(line) + 1
-    if cur_lines:
-        pages.append(cur_lines)
-
-    total_pages = len(pages) or 1
-    base_desc = embed.description
-    for idx, page_lines in enumerate(pages, start=1):
-        page_embed = discord.Embed(
-            title=f"📊 보스 참석 통계 — {period}" + (f" ({idx}/{total_pages})" if total_pages > 1 else ""),
-            description=base_desc + "\n\n" + "\n".join(page_lines),
-            color=discord.Color.gold(),
-        )
-        label = "전원" if top_all else f"상위 {total_listed}명"
-        page_embed.set_footer(text=f"{label} | /stats [일수|all] [상위N|all]")
-        await ctx.send(embed=page_embed)
-    if not pages:
-        await ctx.send(embed=embed)
 
 
 @bot.hybrid_command()
@@ -4242,18 +3975,6 @@ async def refresh(ctx):
         await ctx.send(f"❌ 업데이트 실패: {e}")
 
 
-def _parse_date_arg(date_str):
-    """yymmddhh(8자리) → (sheet_name '2026-05-26', time_str '20:00') 또는 None"""
-    if len(date_str) != 8 or not date_str.isdigit():
-        return None, None
-    yy, mm, dd, hh = date_str[:2], date_str[2:4], date_str[4:6], date_str[6:8]
-    try:
-        dt = datetime(2000 + int(yy), int(mm), int(dd), int(hh), 0)
-        return dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M")
-    except ValueError:
-        return None, None
-
-
 def _find_boss_record_by_id(msg_id):
     """메시지 ID로 보스 기록 검색.
     active_messages.json(활성 메시지) → Excel(마감된 메시지) 순으로 탐색.
@@ -4275,45 +3996,6 @@ def _find_boss_record_by_id(msg_id):
             return (str(msg_id), mine[-1].get("event") or "", mine[-1].get("event_time") or "", sn,
                     [str(r["uid"]) for r in mine if r.get("uid")])
     return None
-
-
-def _find_boss_record(boss_name, sheet_name, target_time):
-    """저장된 기록에서 보스명+날짜+시간으로 검색. (msg_id, boss_time, sheet_name, attendees) 또는 None"""
-    try:
-        th, tm = map(int, target_time.split(":"))
-        target_minutes = th * 60 + tm
-    except Exception:
-        target_minutes = None
-
-    best = None
-    best_diff = float("inf")
-    sheets = (_boss_store().ensure_fresh().get("sheets") or {})
-    names = [sheet_name] if sheet_name in sheets else [s for s in sheets if s not in SYSTEM_SHEETS]
-    for sn in names:
-        rows_by_id = {}
-        for rec in sheets.get(sn, []):
-            if not rec.get("msg_id") or not rec.get("event") or rec.get("event") != boss_name:
-                continue
-            mid = str(rec["msg_id"])
-            if mid not in rows_by_id:
-                rows_by_id[mid] = {"boss_time": rec.get("event_time") or "", "attendees": []}
-            if rec.get("uid"):
-                rows_by_id[mid]["attendees"].append(rec["uid"])
-
-        for mid, data in rows_by_id.items():
-            bt = data["boss_time"]
-            diff = float("inf")
-            if target_minutes is not None and bt:
-                try:
-                    bh, bm = map(int, bt.split(":"))
-                    diff = abs(bh * 60 + bm - target_minutes)
-                except Exception:
-                    pass
-            if diff < best_diff:
-                best_diff = diff
-                best = (mid, bt, sn, data["attendees"])
-
-    return best  # (msg_id, boss_time, sheet_name, attendees)
 
 
 def _apply_attendee_edits_excel_sync(action, msg_id, boss_name, boss_time, sheet_name, targets, current_attendees):
@@ -4420,47 +4102,6 @@ async def _apply_attendee_edits(action, msg_id, boss_name, boss_time, sheet_name
         log.info(f"[수동조정-embed 갱신 실패] {me}")
 
     return None
-
-
-class _AttendeeEditView(rb_perms.GuardedView):
-    # /add·/remove 확인 화면은 채널에 공개로 뜬다 → 확인·취소도 운영진만 (2026-11-06 전수검사)
-    default_level = rb_perms.STAFF
-    default_what = "참석자 추가·제거 확인"
-
-    def __init__(self, action, msg_id, boss_name, boss_time, sheet_name, attendee_uid, attendee_display, current_attendees):
-        super().__init__(timeout=60)
-        self.action = action
-        self.msg_id = msg_id
-        self.boss_name = boss_name
-        self.boss_time = boss_time
-        self.sheet_name = sheet_name
-        self.attendee_uid = attendee_uid        # UID (Excel col4)
-        self.attendee_display = attendee_display  # 표시용 이름 (Excel col6)
-        self.current_attendees = current_attendees
-
-    @discord.ui.button(label="확인", style=discord.ButtonStyle.green)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        err = None
-        try:
-            err = await _apply_attendee_edits(self.action, self.msg_id, self.boss_name, self.boss_time,
-                                              self.sheet_name, [(self.attendee_uid, self.attendee_display)],
-                                              self.current_attendees)
-        except Exception as e:
-            err = f"❌ 처리 실패: {e}"
-        if err:
-            await interaction.followup.send(err)
-        else:
-            verb = "추가" if self.action == "add" else "제거"
-            await interaction.followup.send(
-                f"✅ **{self.attendee_display}**님을 **{self.boss_name} {self.boss_time}** 참석자에서 {verb}했어요."
-            )
-        self.stop()
-
-    @discord.ui.button(label="취소", style=discord.ButtonStyle.red)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content="❌ 취소됐어요.", view=None, embed=None)
-        self.stop()
 
 
 ATTENDEE_EDIT_BUTTON_IDS = ("boss_attendee_add", "boss_attendee_remove")
@@ -4577,96 +4218,6 @@ class _AttendeeRemovePicker(discord.ui.View):
         self.stop()
 
 
-async def _resolve_boss_record(ctx, args):
-    """
-    args 2개: (msg_id, attendee_name)
-    args 3개: (boss_name, date_str, attendee_name)
-    반환: (record, attendee_name) 또는 (None, None)
-    """
-    if len(args) == 2:
-        msg_id, attendee_name = args[0], args[1]
-        if not msg_id.isdigit():
-            await ctx.send("❌ 메시지 ID는 숫자여야 해요. 예: `/add 1505112567712972881 조조야`")
-            return None, None
-        record = _find_boss_record_by_id(msg_id)
-        if not record:
-            await ctx.send(f"❌ 메시지 ID `{msg_id}` 기록을 찾을 수 없어요.")
-            return None, None
-        return record, attendee_name
-    elif len(args) == 3:
-        boss_name, date_str, attendee_name = args
-        sheet_name, target_time = _parse_date_arg(date_str)
-        if not sheet_name:
-            await ctx.send("❌ 날짜 형식이 잘못됐어요. 예: `26052620` (26년 5월 26일 20시)")
-            return None, None
-        record = _find_boss_record(boss_name, sheet_name, target_time)
-        if not record:
-            await ctx.send(f"❌ **{boss_name}** 기록을 찾을 수 없어요. (`{sheet_name}` 날짜 확인)")
-            return None, None
-        return record, attendee_name
-    else:
-        await ctx.send("❌ 사용법:\n`/add 보스명 yymmddhh 유저명`\n`/add 메시지ID 유저명`")
-        return None, None
-
-
-@bot.hybrid_command()
-async def add(ctx, *, args: str = ""):
-    """참석자 수동 추가. 예: /add 카스파 26052620 조조야 또는 /add 1505112567712972881 조조야"""
-    record, attendee_name = await _resolve_boss_record(ctx, tuple(args.split()))
-    if record is None:
-        return
-
-    msg_id, boss_name, boss_time, found_sheet, attendees = record
-
-    # 이름 → UID 변환 (매핑에 없으면 그대로 사용)
-    n2u = _name_to_uid_mapping()
-    attendee_uid = n2u.get(attendee_name, attendee_name)
-    id2n = _load_id_to_name_mapping()
-    attendee_display = id2n.get(str(attendee_uid), attendee_name)
-
-    if attendee_uid in attendees:
-        await ctx.send(f"⚠️ **{attendee_display}**님은 이미 참석자에 포함되어 있어요.\n현재 참석자: {', '.join(id2n.get(u, u) for u in attendees)}")
-        return
-
-    embed = discord.Embed(title="참석자 추가 확인", color=discord.Color.green())
-    embed.add_field(name="보스", value=f"{boss_name} | {boss_time}", inline=True)
-    embed.add_field(name="날짜", value=found_sheet, inline=True)
-    embed.add_field(name="추가할 유저", value=attendee_display, inline=False)
-    embed.add_field(name="현재 참석자", value=", ".join(id2n.get(u, u) for u in attendees) if attendees else "없음", inline=False)
-
-    view = _AttendeeEditView("add", msg_id, boss_name, boss_time, found_sheet, attendee_uid, attendee_display, attendees)
-    await ctx.send(embed=embed, view=view)
-
-
-@bot.hybrid_command()
-async def remove(ctx, *, args: str = ""):
-    """참석자 수동 제거. 예: /remove 카스파 26052620 조조야 또는 /remove 1505112567712972881 조조야"""
-    record, attendee_name = await _resolve_boss_record(ctx, tuple(args.split()))
-    if record is None:
-        return
-
-    msg_id, boss_name, boss_time, found_sheet, attendees = record
-
-    # 이름 → UID 변환
-    n2u = _name_to_uid_mapping()
-    attendee_uid = n2u.get(attendee_name, attendee_name)
-    id2n = _load_id_to_name_mapping()
-    attendee_display = id2n.get(str(attendee_uid), attendee_name)
-
-    if attendee_uid not in attendees:
-        await ctx.send(f"⚠️ **{attendee_display}**님은 참석자 목록에 없어요.\n현재 참석자: {', '.join(id2n.get(u, u) for u in attendees) if attendees else '없음'}")
-        return
-
-    embed = discord.Embed(title="참석자 제거 확인", color=discord.Color.red())
-    embed.add_field(name="보스", value=f"{boss_name} | {boss_time}", inline=True)
-    embed.add_field(name="날짜", value=found_sheet, inline=True)
-    embed.add_field(name="제거할 유저", value=attendee_display, inline=False)
-    embed.add_field(name="현재 참석자", value=", ".join(id2n.get(u, u) for u in attendees), inline=False)
-
-    view = _AttendeeEditView("remove", msg_id, boss_name, boss_time, found_sheet, attendee_uid, attendee_display, attendees)
-    await ctx.send(embed=embed, view=view)
-
-
 @bot.hybrid_command()
 async def fixid(ctx):
     if not _has_boss_data():
@@ -4694,72 +4245,6 @@ async def fixid(ctx):
         await ctx.send(f"✅ **{fixed_count}개** 데이터에 ID 발급 완료!")
     except Exception as e:
         await ctx.send(f"❌ 실패: {e}")
-
-
-@bot.hybrid_command()
-async def reopen(ctx, date_time_str: str, minutes: int = 20):
-    """마감된 알림을 다시 활성화. 예: /reopen 2605161700 또는 /reopen 2605161700 30"""
-    message_id, boss_name, boss_time = find_message_id_by_datetime(date_time_str)
-    if not message_id:
-        await ctx.send(f"❌ 해당 날짜/시간의 데이터를 찾을 수 없어요! (입력: {date_time_str})")
-        return
-
-    try:
-        msg = await bot.get_channel(ALERT_CHANNEL_ID).fetch_message(int(message_id))
-    except Exception:
-        await ctx.send(f"❌ 메시지를 찾을 수 없어요! (ID: {message_id})")
-        return
-
-    attendees = load_attendees_from_excel(int(message_id))
-    boss_name = boss_name or "알 수 없음"
-    boss_time = boss_time or "알 수 없음"
-    loot, _, loot_announcement_id = load_loot_from_excel(int(message_id))
-
-    disable_time = datetime.now() + timedelta(minutes=minutes)
-    attend_view = AttendView(
-        message_id=int(message_id),
-        boss_name=boss_name,
-        boss_time=boss_time,
-        created_date=datetime.now().strftime("%Y-%m-%d"),
-        loot=loot,
-        disable_time=disable_time,
-    )
-    attend_view.attendees = list(attendees)
-    attend_view.loot_announcement_id = str(loot_announcement_id or "")
-    attend_view.loot_acquirers = load_loot_acquirers_from_excel(int(message_id)) or ""
-    image_filename, image_url = _message_image_ref(msg)
-    attend_view.image_filename = image_filename
-    attend_view.image_url = image_url
-
-    names = ", ".join(attend_view.attendees) if attend_view.attendees else "없음"
-    image_file, image_kwargs = _boss_image_file_and_kwargs(boss_name, msg)
-    embed = make_attend_embed(
-        boss_name, len(attend_view.attendees), names, boss_time,
-        loot=attend_view.loot,
-        disable_time=disable_time,
-        loot_acquirers=getattr(attend_view, "loot_acquirers", ""),
-        **image_kwargs,
-    )
-    await _edit_message_with_image(
-        msg,
-        embed=embed,
-        view=attend_view,
-        image_file=image_file,
-        content=_boss_alert_content(boss_name, boss_time),
-    )
-
-    save_active_message(int(message_id), ALERT_CHANNEL_ID, boss_name, boss_time,
-                        disable_time.strftime("%Y-%m-%d %H:%M:%S"),
-                        created_date=datetime.now().strftime("%Y-%m-%d"),
-                        attendees=attend_view.attendees,
-                        loot=attend_view.loot,
-                        loot_announcement_id=attend_view.loot_announcement_id,
-                        image_url=attend_view.image_url,
-                        image_filename=attend_view.image_filename)
-
-    _schedule_close_trigger(message_id, disable_time)
-    log.info(f"[재활성화] {boss_name} {boss_time} | {minutes}분 | 메시지 ID: {message_id}")
-    await ctx.send(f"✅ **{boss_name}** 알림을 다시 활성화했어요! ({minutes}분 후 마감)")
 
 
 @bot.hybrid_command()
@@ -4875,36 +4360,6 @@ async def save(ctx):
         )
     except Exception as e:
         await ctx.send(f"❌ 파일 전송 실패(데이터 저장은 완료됨): {e}")
-
-
-@bot.hybrid_command()
-async def create(ctx, boss_name: str, boss_time_str: str, minutes: int = 20):
-    """수동 참석 알림 생성. 예: /create 카스파 17:00 또는 /create 카스파 17:00 60"""
-    channel = bot.get_channel(ALERT_CHANNEL_ID)
-    if not channel:
-        await ctx.send("❌ 알림 채널을 찾을 수 없어요!")
-        return
-
-    created_date = datetime.now().strftime("%Y-%m-%d")
-    disable_time = datetime.now() + timedelta(minutes=minutes)
-    attend_view = AttendView(boss_name=boss_name, boss_time=boss_time_str, created_date=created_date, disable_time=disable_time)
-    msg = await channel.send(
-        content=_boss_alert_content(boss_name, boss_time_str),
-        embed=make_attend_embed(boss_name, 0, "없음", boss_time_str, disable_time=disable_time),
-        view=attend_view,
-    )
-    attend_view.message_id = msg.id
-
-    save_active_message(msg.id, channel.id, boss_name, boss_time_str,
-                        disable_time.strftime("%Y-%m-%d %H:%M:%S"), created_date=created_date)
-    try:
-        _schedule_voice_check(msg.id, datetime.strptime(f"{created_date} {boss_time_str}", "%Y-%m-%d %H:%M"))
-    except ValueError:
-        pass
-
-    _schedule_close_trigger(msg.id, disable_time)
-    log.info(f"[수동 생성] {boss_name} {boss_time_str} | {minutes}분 후 마감 | 메시지 ID: {msg.id}")
-    await ctx.send(f"✅ **{boss_name}** {boss_time_str} 참석 알림을 생성했어요! ({minutes}분 후 마감)")
 
 
 @bot.hybrid_command()
@@ -5141,202 +4596,6 @@ async def attachloot(ctx, target: str = None, days: str = "7"):
         await ctx.send(f"❌ Excel/JSON 에 해당 메시지 데이터가 없어요. (ID: {target})")
     else:
         await ctx.send(f"❌ 부착 실패. 로그를 확인해주세요. (ID: {target})")
-
-
-@bot.hybrid_command()
-async def close(ctx, message_id: str):
-    """활성 메시지를 수동 마감. 예: /close 메시지ID"""
-    channel = bot.get_channel(ALERT_CHANNEL_ID)
-    if not channel:
-        await ctx.send("❌ 알림 채널을 찾을 수 없어요!")
-        return
-    try:
-        msg = await channel.fetch_message(int(message_id))
-    except Exception:
-        await ctx.send(f"❌ 메시지를 찾을 수 없어요! (ID: {message_id})")
-        return
-
-    active = load_active_messages()
-    info = active.get(message_id)
-    if not info:
-        await ctx.send(f"❌ 활성 메시지가 아니에요! (ID: {message_id})")
-        return
-
-    attend_view = AttendView(
-        message_id=int(message_id),
-        boss_name=info["boss_name"],
-        boss_time=info["boss_time"],
-        created_date=info.get("created_date"),
-        loot=info.get("loot", ""),
-    )
-    attend_view.attendees = list(info.get("attendees", []))
-    attend_view.loot_announcement_id = (
-        info.get("loot_announcement_id", "")
-        or info.get("announcement_msg_id", "")
-        or ""
-    )
-    attend_view.image_url = info.get("image_url", "")
-    attend_view.image_filename = info.get("image_filename", "")
-    await _close_alert(message_id, reason="수동 마감", view=attend_view, message=msg)
-    await ctx.send(f"✅ **{info['boss_name']}** {info['boss_time']} 수동 마감 완료! ({len(attend_view.attendees)}명)")
-
-
-@bot.hybrid_command()
-async def activate(ctx, message_id: str, minutes: int = 0):
-    """마감된 메시지를 수동 활성화. 예: /activate 메시지ID 또는 /activate 메시지ID 30 (0이면 무기한)"""
-    channel = bot.get_channel(ALERT_CHANNEL_ID)
-    if not channel:
-        await ctx.send("❌ 알림 채널을 찾을 수 없어요!")
-        return
-    try:
-        msg = await channel.fetch_message(int(message_id))
-    except Exception:
-        await ctx.send(f"❌ 메시지를 찾을 수 없어요! (ID: {message_id})")
-        return
-
-    active = load_active_messages()
-    info = active.get(message_id)
-    if info:
-        attendees = list(info.get("attendees", []))
-        boss_name = info.get("boss_name", "")
-        boss_time = info.get("boss_time", "")
-        loot = info.get("loot", "") or ""
-        loot_announcement_id = (
-            info.get("loot_announcement_id", "")
-            or info.get("announcement_msg_id", "")
-            or ""
-        )
-    else:
-        attendees = load_attendees_from_excel(int(message_id))
-        boss_name = load_boss_name_from_excel(int(message_id)) or "알 수 없음"
-        boss_time = load_boss_time_from_excel(int(message_id)) or "알 수 없음"
-        loot, _, loot_announcement_id = load_loot_from_excel(int(message_id))
-
-    # 마감 시간 0이면 무기한 (9999분 = 약 7일)
-    disable_minutes = minutes if minutes > 0 else 9999
-    disable_time = datetime.now() + timedelta(minutes=disable_minutes)
-
-    attend_view = AttendView(
-        message_id=int(message_id),
-        boss_name=boss_name,
-        boss_time=boss_time,
-        created_date=datetime.now().strftime("%Y-%m-%d"),
-        loot=loot,
-        disable_time=disable_time if minutes > 0 else None,
-    )
-    attend_view.attendees = list(attendees)
-    attend_view.loot_announcement_id = str(loot_announcement_id or "")
-    attend_view.loot_acquirers = (info.get("loot_acquirers", "") if info else "") or load_loot_acquirers_from_excel(int(message_id)) or ""
-    image_filename, image_url = _message_image_ref(msg)
-    attend_view.image_filename = image_filename or (info.get("image_filename", "") if info else "")
-    attend_view.image_url = image_url or (info.get("image_url", "") if info else "")
-
-    names = ", ".join(attend_view.attendees) if attend_view.attendees else "없음"
-    image_file, image_kwargs = _boss_image_file_and_kwargs(boss_name, msg)
-    embed = make_attend_embed(
-        boss_name, len(attend_view.attendees), names, boss_time,
-        loot=attend_view.loot,
-        disable_time=(disable_time if minutes > 0 else None),
-        loot_acquirers=getattr(attend_view, "loot_acquirers", ""),
-        **image_kwargs,
-    )
-    await _edit_message_with_image(
-        msg,
-        embed=embed,
-        view=attend_view,
-        image_file=image_file,
-        content=_boss_alert_content(boss_name, boss_time),
-    )
-    save_active_message(int(message_id), channel.id, boss_name, boss_time,
-                        disable_time.strftime("%Y-%m-%d %H:%M:%S"),
-                        created_date=datetime.now().strftime("%Y-%m-%d"),
-                        attendees=attend_view.attendees,
-                        loot=attend_view.loot,
-                        loot_announcement_id=attend_view.loot_announcement_id,
-                        image_url=attend_view.image_url,
-                        image_filename=attend_view.image_filename)
-
-    if minutes > 0:
-        _schedule_close_trigger(message_id, disable_time)
-
-    deadline_msg = f"{minutes}분 후 마감" if minutes > 0 else "수동 마감 전까지 유지"
-    log.info(f"[수동 활성화] {boss_name} {boss_time} | {deadline_msg} | 메시지 ID: {message_id}")
-    await ctx.send(f"✅ **{boss_name}** {boss_time} 활성화! ({deadline_msg})")
-
-
-@bot.hybrid_command()
-async def extend(ctx, message_id: str, minutes: int = 20):
-    """활성 메시지의 마감 시간 연장. 예: /extend 메시지ID 30"""
-    active = load_active_messages()
-    info = active.get(message_id)
-    if not info:
-        await ctx.send(f"❌ 활성 메시지가 아니에요! (ID: {message_id})")
-        return
-
-    new_disable_time = datetime.now() + timedelta(minutes=minutes)
-    info["disable_time"] = new_disable_time.strftime("%Y-%m-%d %H:%M:%S")
-    patch_active_message(message_id, disable_time=info["disable_time"])
-
-    channel = bot.get_channel(ALERT_CHANNEL_ID)
-    try:
-        msg = await channel.fetch_message(int(message_id))
-        attend_view = AttendView(
-            message_id=int(message_id),
-            boss_name=info["boss_name"],
-            boss_time=info["boss_time"],
-            created_date=info.get("created_date"),
-            loot=info.get("loot", ""),
-            disable_time=new_disable_time,
-        )
-        attend_view.attendees = list(info.get("attendees", []))
-        attend_view.loot_acquirers = info.get("loot_acquirers", "") or load_loot_acquirers_from_excel(int(message_id)) or ""
-        attend_view.loot_announcement_id = (
-            info.get("loot_announcement_id", "")
-            or info.get("announcement_msg_id", "")
-            or ""
-        )
-        attend_view.image_url = info.get("image_url", "")
-        attend_view.image_filename = info.get("image_filename", "")
-        image_filename, image_url = _message_image_ref(msg)
-        if image_filename:
-            attend_view.image_filename = image_filename
-        if image_url:
-            attend_view.image_url = image_url
-        if attend_view.image_filename:
-            info["image_filename"] = attend_view.image_filename
-        if attend_view.image_url:
-            info["image_url"] = attend_view.image_url
-        if attend_view.loot_announcement_id:
-            info["loot_announcement_id"] = attend_view.loot_announcement_id
-        patch_active_message(message_id, image_filename=info.get("image_filename", ""),
-                             image_url=info.get("image_url", ""),
-                             loot_announcement_id=info.get("loot_announcement_id", ""))
-        # 새 마감 시각이 적용된 embed 로 갱신 (카운트다운이 즉시 갱신됨)
-        names = ", ".join(attend_view.attendees) if attend_view.attendees else "없음"
-        try:
-            image_file, image_kwargs = _boss_image_file_and_kwargs(attend_view.boss_name, msg)
-            new_embed = make_attend_embed(
-                attend_view.boss_name, len(attend_view.attendees), names, attend_view.boss_time,
-                loot=attend_view.loot, disable_time=new_disable_time,
-                loot_acquirers=getattr(attend_view, "loot_acquirers", ""),
-                **image_kwargs,
-            )
-            await _edit_message_with_image(
-                msg,
-                embed=new_embed,
-                view=attend_view,
-                image_file=image_file,
-                content=_boss_alert_content(attend_view.boss_name, attend_view.boss_time),
-            )
-        except Exception:
-            pass
-
-        _schedule_close_trigger(message_id, new_disable_time)
-    except Exception:
-        pass
-
-    log.info(f"[마감 연장] {info['boss_name']} {info['boss_time']} | +{minutes}분 | 메시지 ID: {message_id}")
-    await ctx.send(f"✅ **{info['boss_name']}** {info['boss_time']} 마감 시간을 **{minutes}분** 연장했어요! ({new_disable_time.strftime('%H:%M')} 마감)")
 
 
 @bot.hybrid_command()

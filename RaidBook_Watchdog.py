@@ -827,23 +827,14 @@ _BOT_ALIASES = {
 # 봇별 명령어 목록  {prefix: [(cmd, 설명), ...]} — GUI 명령어 패널에서도 사용
 _BOT_COMMANDS = {
     "boss": [
-        ("listboss", "현재 보스 스케줄 목록"),
         ("startboss [이름] [HH:MM] [주기]", "보스 스케줄 시작"),
         ("stopboss [이름]", "보스 스케줄 중지 (생략 시 전체)"),
         ("setboss [이름] [시간]", "보스 주기 변경"),
-        ("history [일수]", "히스토리 조회 (기본 7일)"),
-        ("stats [일수|all] [상위N|all]", "참석자 통계 (기본 30일/25명)"),
         ("setrefresh [HH:MM]", "일일 정리 시각 변경"),
-        ("create [이름] [HH:MM] [분]", "보스 메시지 생성"),
-        ("close [메시지ID]", "보스 마감"),
-        ("activate [메시지ID] [분]", "보스 재활성화"),
-        ("extend [메시지ID] [분]", "마감 시간 연장"),
-        ("reopen [날짜시간] [분]", "보스 재오픈"),
         ("rename [기존이름] [새이름]", "보스 이름 변경"),
         ("recover [메시지ID]", "메시지 복구"),
         ("sync [메시지ID]", "메시지 동기화"),
         ("delete [메시지ID]", "메시지 삭제"),
-        ("listdailyboss", "매일 고정시간 반복 알림 목록"),
         ("startdailyboss [이름]", "config daily_bosses 보스 매일 반복 시작"),
         ("stopdailyboss [이름]", "매일 반복 알림 중지"),
         ("attachloot [메시지ID|all] [일수]", "기존 메시지에 획득 아이템 버튼 부착"),
@@ -1164,23 +1155,14 @@ async def _wdog_cmd(ctx, action: str = "status", target: str = "all", *flags):
         if target.lower() == "boss":
             await ctx.send(
                 "**Boss Bot 명령어** (`!boss [명령어] [인자...]`)\n"
-                "`!boss listboss` — 현재 보스 스케줄 목록\n"
                 "`!boss startboss [이름] [HH:MM] [주기]` — 보스 스케줄 시작\n"
                 "`!boss stopboss [이름]` — 보스 스케줄 중지 (이름 생략 시 전체)\n"
                 "`!boss setboss [이름] [시간]` — 보스 주기 변경\n"
-                "`!boss history [일수]` — 히스토리 조회 (기본 7일)\n"
-                "`!boss stats [일수|all] [상위N|all]` — 참석자 통계 (기본 30일/25명, all 입력 시 제한 해제)\n"
                 "`!boss setrefresh [HH:MM]` — 일일 정리 시각 변경\n"
-                "`!boss create [이름] [HH:MM] [분]` — 보스 메시지 생성\n"
-                "`!boss close [메시지ID]` — 보스 마감\n"
-                "`!boss activate [메시지ID] [분]` — 보스 재활성화\n"
-                "`!boss extend [메시지ID] [분]` — 마감 시간 연장\n"
-                "`!boss reopen [날짜시간] [분]` — 보스 재오픈\n"
                 "`!boss rename [기존이름] [새이름]` — 보스 이름 변경\n"
                 "`!boss recover [메시지ID]` — 메시지 복구\n"
                 "`!boss sync [메시지ID]` — 메시지 동기화\n"
                 "`!boss delete [메시지ID]` — 메시지 삭제\n"
-                "`!boss listdailyboss` — 매일 고정시간 반복 알림 목록\n"
                 "`!boss startdailyboss [이름]` — config daily_bosses 보스 매일 반복 시작\n"
                 "`!boss stopdailyboss [이름]` — 매일 반복 알림 중지\n"
                 "`!boss attachloot [메시지ID|all] [일수]` — 기존 메시지에 획득 아이템 버튼 부착\n"
