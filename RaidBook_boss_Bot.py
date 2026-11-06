@@ -37,6 +37,7 @@ import RaidBook_attendance as rb_att
 import RaidBook_clans as rb_clans
 import RaidBook_combat_support as rb_combat
 import RaidBook_broadcast as rb_broadcast
+import RaidBook_boss_manual as rb_manual
 import RaidBook_verify as rb_verify
 import RaidBook_verify_perms as rb_vperms
 from RaidBook_boss_data import (
@@ -3196,18 +3197,19 @@ def _schedule_party_confirm_task(attend_view: "AttendView", message_id: int, cha
 
 
 async def _post_boss_alert(boss_name, spawn_dt):
-    """보스 알림 메시지 1건 게시 (interval/daily 공용 콜백).
-    메시지 생성·활성 저장·TTS·자동 마감·파티 확정까지 담당. 타이밍은 RaidBook_schedule 엔진."""
+    """보스 알림 메시지 1건 게시 (interval/daily 공용 콜백, /보스알림 수동 생성도 같이 씀).
+    메시지 생성·활성 저장·TTS·자동 마감·파티 확정까지 담당. 타이밍은 RaidBook_schedule 엔진.
+    게시한 메시지를 돌려준다 (채널을 못 찾으면 None)."""
     channel = bot.get_channel(ALERT_CHANNEL_ID)
     if channel is None:
         try:
             channel = await bot.fetch_channel(ALERT_CHANNEL_ID)
         except Exception as e:
             log.warning(f"[알림 실패] {boss_name} | 채널 조회 실패: {e}")
-            return
+            return None
     if channel is None:
         log.warning(f"[알림 실패] {boss_name} | 알림 채널을 찾을 수 없음 (ALERT_CHANNEL_ID={ALERT_CHANNEL_ID})")
-        return
+        return None
 
     boss_time_str = spawn_dt.strftime("%H:%M")
     # config의 close_minutes 기준 자동 마감. 0 → 등장 시각 정각 마감, null/없음/음수 → 자동 마감 비활성화 (무기한 유지)
@@ -3247,6 +3249,7 @@ async def _post_boss_alert(boss_name, spawn_dt):
 
     if disable_time is not None:
         _schedule_close_trigger(msg.id, disable_time)
+    return msg
 
 
 def _collect_voice_members(guild, voice_channel=None) -> dict:
@@ -3844,6 +3847,50 @@ async def cmd_combat_support(interaction: discord.Interaction):
         return
     log.info(f"[명령어] /전투지원 | 사용자: {getattr(interaction.user, 'display_name', interaction.user)}")
     await interaction.response.send_modal(rb_combat.CombatModal(combat_support))
+
+
+def _manual_boss_options():
+    dirs = [os.path.join(base, "Images", "boss") for base in (_RUNTIME_DIR, _SCRIPT_DIR)]
+    return rb_manual.boss_options(BOSSES_CONFIG, DAILY_BOSSES_CONFIG, dirs)
+
+
+async def _create_manual_boss_alert(interaction: discord.Interaction, boss_name, spawn_dt):
+    """/보스알림 팝업 제출 → 자동 알림과 같은 _post_boss_alert 로 게시 (화면·버튼·인원체크·마감·저장 동일)."""
+    user = getattr(interaction.user, "display_name", None) or interaction.user.name
+    when = rb_manual.fmt_spawn(spawn_dt)
+    dup = rb_manual.find_duplicate(load_active_messages(), boss_name, spawn_dt)
+    if dup:
+        await interaction.followup.send(
+            f"⚠️ **{boss_name}** {when} 보스알림이 이미 있어요 👉 {_alert_link(dup)}", ephemeral=True)
+        return
+    msg = await _post_boss_alert(boss_name, spawn_dt)
+    if msg is None:
+        await interaction.followup.send("❌ 보스알림 채널을 찾을 수 없어요.", ephemeral=True)
+        return
+    past = spawn_dt <= datetime.now()
+    log.info(f"[수동 생성] {boss_name} {spawn_dt:%Y-%m-%d %H:%M} | 운영진: {user} | 메시지 ID: {msg.id}"
+             + (" | 지난 일시 → 즉시 인원체크·마감" if past else ""))
+    await interaction.followup.send(
+        f"✅ **{boss_name}** {when} 보스알림을 만들었어요"
+        + (" (이미 지난 일시라 바로 인원체크 후 마감돼요)" if past else "")
+        + f" 👉 {msg.jump_url}", ephemeral=True)
+
+
+@bot.tree.command(name="보스알림", description="운영진 전용 — 팝업에 보스와 젠 일시를 적어 보스알림을 직접 만들어요")
+async def cmd_manual_boss_alert(interaction: discord.Interaction):
+    user = interaction.user
+    log.info(f"[명령어] /보스알림 | 사용자: {getattr(user, 'display_name', user)}")
+    if not _is_bot_admin(user):
+        await interaction.response.send_message("⛔ 보스알림 생성은 운영진만 할 수 있어요.", ephemeral=True)
+        return
+    try:
+        alert_cid = int(ALERT_CHANNEL_ID or 0)
+    except (TypeError, ValueError):
+        alert_cid = 0
+    if alert_cid and interaction.channel_id != alert_cid:
+        await interaction.response.send_message(f"보스알림 채널에서 써 주세요 👉 <#{alert_cid}>", ephemeral=True)
+        return
+    await interaction.response.send_modal(rb_manual.BossAlertModal(_manual_boss_options(), _create_manual_boss_alert))
 
 
 @bot.tree.command(name="전파", description="운영진 전용 — 적은 내용을 혈맹 대화방 전체에 음성으로 전달해요")
