@@ -8,6 +8,7 @@ RaidBook Lite — 보스 알림/인원체크/경매만 남긴 경량판. 원본(
 - `RaidBook_TTS_Bot.py`(별도 프로세스, 공용 로직 `RaidBook_tts`) — `/tts 내용 [목소리]`를 edge_tts로 읽고 채널에 글 + 🔄 다시 듣기(persistent, 메시지 내용 재해석) 남김. **전용 토큰 필수**(보스/음악 토큰과 같으면 시작 안 함). `tts` 채널 자동 생성, 토큰 비면 대기만. 설정 마법사 3단계(선택), 추가 음악봇 토큰은 4단계(선택)
 - 보스봇 모듈: boss_auction(경매), combat_support(/전투지원 — 15자 팝업 → 전투알림 채널 등록 + 대화방 음성 안내(`combat_support.tts_channel_ids` 개수만큼 — 음악봇 IPC announce(7705)로 방마다 뮤직봇 하나씩 동시에, 재생 중이면 재생 종료 후 사용, `rbm.assign_announce`; 음악봇 꺼지면 TTS 봇 speak로 차례로) + 전투방 링크·인원체크·➕/➖·⏹️ 전투종료(운영진·요청자, 마지막 인원체크 후 회색·인원체크 끔), 화면은 B안(제목 고정·📌 내용), 채널은 boss_config `combat_alert_channel_id`·`combat_support.clans`), loot(전리품 공지), attendance, boss_data, members, party, schedule, store_*, storage, users, images, ipc, common
 - /전파(`RaidBook_broadcast`) — 운영진(역할 이름이 `broadcast.role_suffix`='운영진'으로 끝남)만, `broadcast.channel_ids` 채널에서만. 내용(50자)을 채널에 📢로 남기고 전투지원과 같은 대화방(`combat_support.tts_channel_ids`)에 `CombatSupport.speak`로 음성 전달 ("닉네임님 전달. 내용")
+- 🔐 서버 입장 인증(`RaidBook_verify`) — `#인증` 채널(`verify_channel_id`, 비면 자동 생성)에 안내 메시지(B안: 🔐 서버 입장 인증 + 1·2 안내 + ⚠️ N회 틀리면 추방) + 🔑 비밀번호 입력 버튼(persistent `rb_verify:open`) → 모달 → 결과는 ephemeral. 맞으면 `verify.role_id`(비면 `role_name`='인증됨' 찾거나 생성) 부여, `verify.max_failures`(5)회 틀리면 추방(`fail_action`=kick). 틀린 횟수·안내 메시지 ID는 `Data/verify_state.json`. 첫 시작 때 기존 멤버 일괄 인증 1회(`_verify_existing_granted`). 봇은 시작 때마다 인증됨 부여. `/인증권한`(서버 관리 권한자, `RaidBook_verify_perms`): 모든 카테고리·채널을 @everyone 보기 끔 + 인증됨 보기 켬(원래 비공개 채널은 열지 않음), 다른 역할 권한 삭제(`verify.keep_role_suffix`='운영진'으로 끝나는 역할·managed 역할·멤버 개별 권한은 유지), #인증은 @everyone만. ephemeral 미리보기 → ✅ 적용, 적용 전 `Data/verify_perm_backup_*.json` 백업 → `/인증권한 복구`. 기존 멤버 일괄 인증 전엔 거부
 - 런타임 경로: 소스 실행=저장소 폴더, 설치판=`C:\ProgramData\RaidBook` (`config_helper.get_runtime_dir`)
 
 ## 규칙
@@ -27,6 +28,8 @@ python Tests/test_tts.py
 python Tests/test_clans.py
 python Tests/test_combat_support.py
 python Tests/test_broadcast.py
+python Tests/test_verify.py
+python Tests/test_verify_perms.py
 python -m pyflakes *.py
 ```
 
