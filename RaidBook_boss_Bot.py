@@ -4,7 +4,6 @@ from discord.ext import commands
 from discord import ui
 from datetime import datetime, timedelta
 import asyncio
-import openpyxl
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -46,8 +45,6 @@ from RaidBook_boss_data import (
     load_attendees_by_message_id as _load_attendees_by_message_id_core,
     load_loot_record as _load_loot_record_core,
     load_loot_acquirers as _load_loot_acquirers_core,
-    upsert_attendance_records as _upsert_attendance_records_core,
-    upsert_loot_record as _upsert_loot_record_core,
 )
 from RaidBook_boss_auction import (
     AuctionSetupModal,
@@ -651,6 +648,10 @@ def backup_excel():
 
 def backup_excel_daily_snapshot():
     """자정 일자별 스냅샷. Data/Backup/Boss/Daily/ 에 1일 1파일로 저장. 최대 30일 보관."""
+    try:
+        _boss_store().snapshot(BOSS_BACKUP_DAILY_DIR)   # 원본 JSON 스냅샷
+    except Exception as e:
+        log.info(f"[일자 백업 실패-JSON] {e}")
     if not os.path.exists(EXCEL_PATH):
         return
     if not _is_valid_xlsx(EXCEL_PATH):
@@ -667,6 +668,81 @@ def restore_backup():
         "RaidBook_Boss_Data",
         log,
     )
+
+
+# ── 보스 데이터 원본 = JSON (Data/store/attend/RaidBook_Boss_Data.json) ─────────────────
+# 평소 기록은 JSON에만 한다(빠름). 엑셀(RaidBook_Boss_Data.xlsx)은 /save·일일 정리 때 JSON으로 만들어
+# 디스코드에 올리고 PC 파일도 그때 최신화한다. 처음 실행 때 기존 엑셀 내용을 JSON으로 한 번 옮겨 온다.
+def _boss_store():
+    from RaidBook_store_attend import get_mirror, set_primary
+    set_primary(EXCEL_PATH, BOSS_BACKUP_DIR)
+    return get_mirror(EXCEL_PATH, rb_att.BOSS_SCHEMA, set(SYSTEM_SHEETS), LOOT_SHEET)
+
+
+def _has_boss_data():
+    st = _boss_store()
+    return os.path.exists(st._store.path) or os.path.exists(EXCEL_PATH)
+
+
+def _iter_boss_records(only_sheet=None):
+    """(시트명, 기록 dict) 순회 — 기록: msg_id, event, event_time, uid, joined_at, name, points."""
+    for sn, recs in _boss_store().iter_sheets(only_sheet=only_sheet, system_sheets=set(SYSTEM_SHEETS)):
+        for rec in recs:
+            yield sn, rec
+
+
+def _wb_from_store():
+    """JSON → 메모리 통합문서 (날짜 시트 + 획득 아이템). 관리 명령이 기존 엑셀 처리 코드를 그대로 쓰게."""
+    return _boss_store().build_workbook(RAW_HEADERS, LOOT_HEADERS, apply_header=apply_header)
+
+
+def _commit_wb(wb):
+    """관리 명령이 통합문서 형태로 고친 내용을 JSON 원본에 반영. 반환: (성공, 오류)."""
+    try:
+        st = _boss_store()
+        st.replace_all(st.import_workbook(wb))
+        return True, None
+    except Exception as e:
+        log.info(f"[보스 데이터 반영 실패] {type(e).__name__}: {e}")
+        return False, e
+
+
+def export_boss_excel_sync():
+    """JSON → 엑셀 파일(통계 시트 포함)로 내보내 PC의 RaidBook_Boss_Data.xlsx를 최신화. 반환: (성공, 오류)."""
+    wb = _wb_from_store()
+    for sn in wb.sheetnames:
+        if sn not in SYSTEM_SHEETS:
+            reapply_raw_sheet_format(wb[sn])
+    update_history_sheet(wb)
+    update_boss_attendance_sheet(wb)
+    update_stats_sheet(wb)
+    reorder_sheets(wb)
+    ok, err = save_workbook_safely_sync(wb, EXCEL_PATH, "보스 데이터")
+    if ok:
+        backup_excel()
+    return ok, err
+
+
+def _tidy_and_export_sync(message_map, *, map_user_ids=True, write_xlsx=True):
+    """데이터 정리(ID 발급·형식·UID 매핑) → JSON 원본 반영 → 엑셀 파일 내보내기. 작업 스레드에서 실행.
+    반환: (성공, 오류, ID 발급 수, UID 매핑 수)."""
+    wb = _wb_from_store()
+    auto_migrate_excel(wb)
+    fixed = fix_missing_ids(wb, message_map)
+    for sn in wb.sheetnames:
+        if sn not in SYSTEM_SHEETS:
+            reapply_raw_sheet_format(wb[sn])
+    mapped = apply_user_id_mapping(wb) if map_user_ids else 0
+    update_history_sheet(wb)
+    update_boss_attendance_sheet(wb)
+    update_stats_sheet(wb)
+    reorder_sheets(wb)
+    ok, err = _commit_wb(wb)
+    if ok and write_xlsx:
+        ok, err = save_workbook_safely_sync(wb, EXCEL_PATH, "보스 데이터")
+        if ok:
+            backup_excel()
+    return ok, err, fixed, mapped
 
 
 def apply_header(ws, headers):
@@ -933,7 +1009,7 @@ def load_expired_message_bundle(message_id):
         "loot_acquirers": "",
         "loot_announcement_id": "",
     }
-    if not os.path.exists(EXCEL_PATH):
+    if not _has_boss_data():
         return result
     target = str(message_id)
     # JSON 미러 우선 (7단계) — 실패 시 Excel 직접 읽기
@@ -994,62 +1070,20 @@ def load_expired_message_bundle(message_id):
     return result
 
 
-def _warm_attend_mirror():
-    """저장 직후(작업 스레드에서) JSON 미러를 새로 만들어 둔다 — 다음 버튼 클릭이 통합문서 재읽기를 떠안지 않게."""
-    try:
-        from RaidBook_boss_data import _mirror as _bd_mirror
-        m = _bd_mirror(EXCEL_PATH, system_sheets=SYSTEM_SHEETS)
-        if m is not None:
-            m.ensure_fresh()
-    except Exception as e:
-        log.info(f"[미러 갱신 실패] {type(e).__name__}: {e}")
-
-
 def _attend_mirror_fresh() -> bool:
     try:
-        from RaidBook_boss_data import _mirror as _bd_mirror
-        m = _bd_mirror(EXCEL_PATH, system_sheets=SYSTEM_SHEETS)
-        return m is not None and m.is_fresh()
+        return _boss_store().is_fresh()
     except Exception:
         return False
 
 
 def _save_boss_loot_sync(message_id, boss_name, boss_time, loot_text, editor, announcement_msg_id, acquirers):
-    """획득 아이템 저장 본체 (스레드에서 실행 — 통합문서 로드·저장이 수 초 걸려도 봇은 멈추지 않는다)."""
-    if not os.path.exists(EXCEL_PATH):
-        wb = openpyxl.Workbook()
-        # 기본 시트 제거
-        default = wb.active
-        wb.remove(default)
-    else:
-        wb = load_workbook(EXCEL_PATH)
-
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    existing_ann = _upsert_loot_record_core(
-        wb,
-        message_id,
-        boss_name,
-        boss_time,
-        loot_text,
-        editor,
-        announcement_msg_id=announcement_msg_id,
-        now_str=now_str,
-        acquirers=acquirers,
-        loot_sheet=LOOT_SHEET,
-        loot_headers=LOOT_HEADERS,
-        apply_header=apply_header,
-    )
-    ws = wb[LOOT_SHEET]
-
-    apply_border_all(ws)
-    auto_column_width(ws)
-    reorder_sheets(wb)
-
-    save_ok, last_err = save_workbook_safely_sync(wb, EXCEL_PATH, "보스 데이터")
-    if save_ok:
-        backup_excel()
-        _warm_attend_mirror()
-    return save_ok, last_err, existing_ann
+    """획득 아이템 저장 (JSON 원본, 작업 스레드에서 실행)."""
+    existing_ann = _boss_store().upsert_loot(
+        message_id, boss_name, boss_time, loot_text, editor,
+        ann_id=announcement_msg_id, now_str=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        acquirers=acquirers)
+    return True, None, existing_ann
 
 
 async def save_boss_loot_to_excel(message_id, boss_name, boss_time, loot_text, editor, announcement_msg_id=None, acquirers=None):
@@ -1073,40 +1107,12 @@ async def save_boss_loot_to_excel(message_id, boss_name, boss_time, loot_text, e
 
 
 def _save_boss_attendees_sync(message_id, boss_name, boss_time, attendees, today, prune):
-    """참석자 저장 본체 (스레드에서 실행). 통합문서 전체 로드 + 통계 시트 재계산 + 저장 + 백업이
-    수 초 걸리는데, 예전엔 이벤트 루프에서 돌아 그동안 모든 버튼 응답이 멈췄다."""
-    wb = openpyxl.Workbook() if not os.path.exists(EXCEL_PATH) else load_workbook(EXCEL_PATH)
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    mapping = _load_id_to_name_mapping()  # {uid: name}
-    ws = _upsert_attendance_records_core(
-        wb,
-        today,
-        message_id,
-        boss_name,
-        boss_time,
-        attendees,
-        id_to_name=mapping,
-        calculate_points=calculate_points,
-        raw_headers=RAW_HEADERS,
-        apply_header=apply_header,
-        now_str=now_str,
-        prune=prune,
-    )
-
-    apply_border_all(ws)
-    auto_column_width(ws)
-
-    update_history_sheet(wb)
-    update_boss_attendance_sheet(wb)
-    update_stats_sheet(wb)
-    reorder_sheets(wb)
-
-    save_ok, last_err = save_workbook_safely_sync(wb, EXCEL_PATH, "보스 데이터")
-    if save_ok:
-        # (B) 성공 시점에만 백업해 백업 풀이 항상 유효 상태로 유지
-        backup_excel()
-        _warm_attend_mirror()
-    return save_ok, last_err
+    """참석자 저장 (JSON 원본, 작업 스레드에서 실행). 예전엔 엑셀 전체 로드 + 통계 재계산 + 저장이 매번 수 초."""
+    _boss_store().upsert_attendance(
+        today, message_id, boss_name, boss_time, attendees,
+        id_to_name=_load_id_to_name_mapping(), points_fn=calculate_points,
+        now_str=datetime.now().strftime("%Y-%m-%d %H:%M:%S"), prune=prune)
+    return True, None
 
 
 async def save_boss_attendees_to_excel(message_id, boss_name, boss_time, attendees, created_date=None, *, prune=False):
@@ -1244,32 +1250,18 @@ def load_attendees_from_excel(message_id):
 
 
 def load_boss_time_from_excel(message_id):
-    if not os.path.exists(EXCEL_PATH):
-        return None
-    wb = load_workbook(EXCEL_PATH)
-    str_message_id = str(message_id)
-    for sheet_name in wb.sheetnames:
-        if sheet_name in SYSTEM_SHEETS:
-            continue
-        ws = wb[sheet_name]
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            if str(row[0]) == str_message_id:
-                return row[2] if len(row) > 2 else None
+    target = str(message_id)
+    for _sn, rec in _iter_boss_records():
+        if rec.get("msg_id") == target:
+            return rec.get("event_time") or None
     return None
 
 
 def load_boss_name_from_excel(message_id):
-    if not os.path.exists(EXCEL_PATH):
-        return None
-    wb = load_workbook(EXCEL_PATH)
-    str_message_id = str(message_id)
-    for sheet_name in wb.sheetnames:
-        if sheet_name in SYSTEM_SHEETS:
-            continue
-        ws = wb[sheet_name]
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            if str(row[0]) == str_message_id:
-                return row[1] if len(row) > 1 else None
+    target = str(message_id)
+    for _sn, rec in _iter_boss_records():
+        if rec.get("msg_id") == target:
+            return rec.get("event") or None
     return None
 
 
@@ -1283,22 +1275,18 @@ def find_message_id_by_datetime(date_time_str):
     except Exception:
         return None, None, None
 
-    if not os.path.exists(EXCEL_PATH):
-        return None, None, None
-    wb = load_workbook(EXCEL_PATH)
-    if date_str not in wb.sheetnames:
-        return None, None, None
-    ws = wb[date_str]
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        if row[2] and str(row[2]) == time_str:
-            return str(row[0]), row[1], row[2]
+    data = _boss_store().ensure_fresh()
+    for rec in (data.get("sheets") or {}).get(date_str, []):
+        if rec.get("event_time") and str(rec["event_time"]) == time_str:
+            return str(rec["msg_id"]), rec.get("event"), rec.get("event_time")
     return None, None, None
 
 
 def get_history_text(days=7):
-    if not os.path.exists(EXCEL_PATH):
+    if not _has_boss_data():
         return None
-    wb = load_workbook(EXCEL_PATH)
+    wb = _wb_from_store()
+    update_history_sheet(wb)
     if "히스토리" not in wb.sheetnames:
         return None
     ws = wb["히스토리"]
@@ -4164,7 +4152,7 @@ async def history(ctx, days: int = 7):
 async def stats(ctx, period: str = "30", top: str = "25"):
     """참석자별 보스 참석 통계. 예: /stats 30 25 (최근 30일, 상위 25명)
     /stats all → 전체 기간"""
-    if not os.path.exists(EXCEL_PATH):
+    if not _has_boss_data():
         await ctx.send("❌ 저장된 데이터가 없어요!")
         return
 
@@ -4333,7 +4321,7 @@ async def stats(ctx, period: str = "30", top: str = "25"):
 
 @bot.hybrid_command()
 async def refresh(ctx):
-    if not os.path.exists(EXCEL_PATH):
+    if not _has_boss_data():
         await ctx.send("❌ 저장된 데이터가 없어요!")
         return
     try:
@@ -4341,22 +4329,11 @@ async def refresh(ctx):
         guild_updated = await update_mapping_from_guild(ctx.guild) if ctx.guild else 0
         message_map = await build_message_map_from_channel()
         async with excel_lock:
-            wb = load_workbook(EXCEL_PATH)
-            auto_migrate_excel(wb)
-            fixed_count = fix_missing_ids(wb, message_map)
-            for sheet_name in wb.sheetnames:
-                if sheet_name not in SYSTEM_SHEETS:
-                    reapply_raw_sheet_format(wb[sheet_name])
-            mapped_count = apply_user_id_mapping(wb)
-            update_history_sheet(wb)
-            update_boss_attendance_sheet(wb)
-            update_stats_sheet(wb)
-            reorder_sheets(wb)
-            save_ok, save_err = await save_workbook_safely(wb, EXCEL_PATH, "보스 데이터")
+            save_ok, save_err, fixed_count, mapped_count = await asyncio.to_thread(
+                _tidy_and_export_sync, message_map, write_xlsx=False)
             if not save_ok:
                 await ctx.send(f"❌ 데이터 저장 실패: {save_err}")
                 return
-            backup_excel()
 
         # 로그 기반 데이터 검증
         verified = 0
@@ -4367,19 +4344,12 @@ async def refresh(ctx):
             log.info(f"[로그 검증 오류] {e}")
             await ctx.send(f"⚠️ 로그 검증 중 오류가 발생했어요: {e}")
 
-        # 검증 후 통계 재갱신
-        if verified > 0:
-            async with excel_lock:
-                wb = load_workbook(EXCEL_PATH)
-                update_history_sheet(wb)
-                update_boss_attendance_sheet(wb)
-                update_stats_sheet(wb)
-                reorder_sheets(wb)
-                save_ok, save_err = await save_workbook_safely(wb, EXCEL_PATH, "보스 데이터")
-                if not save_ok:
-                    await ctx.send(f"❌ 로그 검증 보정 저장 실패: {save_err}")
-                    return
-                backup_excel()
+        # 엑셀 파일 최신화 (검증 보정까지 반영)
+        async with excel_lock:
+            save_ok, save_err = await asyncio.to_thread(export_boss_excel_sync)
+        if not save_ok:
+            await ctx.send(f"❌ 엑셀 파일 저장 실패: {save_err}")
+            return
 
         status_parts = []
         if guild_updated > 0:
@@ -4422,36 +4392,17 @@ def _find_boss_record_by_id(msg_id):
         sheet_name = info.get("created_date", datetime.now().strftime("%Y-%m-%d"))
         return (str(msg_id), info.get("boss_name", ""), info.get("boss_time", ""), sheet_name, attendees)
 
-    # ── 2순위: Excel (마감된 메시지) ──────────────────────────────────────────
-    if not os.path.exists(EXCEL_PATH):
-        return None
-    wb = load_workbook(EXCEL_PATH)
-    for sn in wb.sheetnames:
-        if sn in SYSTEM_SHEETS:
-            continue
-        ws = wb[sn]
-        data = {"boss_name": "", "boss_time": "", "attendees": []}
-        found = False
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            if not row[0] or str(row[0]) != msg_id:
-                continue
-            found = True
-            data["boss_name"] = row[1] or ""
-            data["boss_time"] = row[2] or ""
-            if row[3]:
-                data["attendees"].append(str(row[3]))
-        if found:
-            wb.close()
-            return (msg_id, data["boss_name"], data["boss_time"], sn, data["attendees"])
-    wb.close()
+    # ── 2순위: 저장된 기록 (마감된 메시지) ──────────────────────────────────────
+    for sn, recs in _boss_store().iter_sheets(system_sheets=set(SYSTEM_SHEETS)):
+        mine = [r for r in recs if r.get("msg_id") == str(msg_id)]
+        if mine:
+            return (str(msg_id), mine[-1].get("event") or "", mine[-1].get("event_time") or "", sn,
+                    [str(r["uid"]) for r in mine if r.get("uid")])
     return None
 
 
 def _find_boss_record(boss_name, sheet_name, target_time):
-    """Excel에서 보스명+날짜+시간으로 기록 검색. (msg_id, boss_time, attendees) 또는 None"""
-    if not os.path.exists(EXCEL_PATH):
-        return None
-    wb = load_workbook(EXCEL_PATH)
+    """저장된 기록에서 보스명+날짜+시간으로 검색. (msg_id, boss_time, sheet_name, attendees) 또는 None"""
     try:
         th, tm = map(int, target_time.split(":"))
         target_minutes = th * 60 + tm
@@ -4460,23 +4411,18 @@ def _find_boss_record(boss_name, sheet_name, target_time):
 
     best = None
     best_diff = float("inf")
-
-    sheets = [sheet_name] if sheet_name in wb.sheetnames else [
-        s for s in wb.sheetnames if s not in SYSTEM_SHEETS
-    ]
-    for sn in sheets:
-        ws = wb[sn]
+    sheets = (_boss_store().ensure_fresh().get("sheets") or {})
+    names = [sheet_name] if sheet_name in sheets else [s for s in sheets if s not in SYSTEM_SHEETS]
+    for sn in names:
         rows_by_id = {}
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            if not row[0] or not row[1]:
+        for rec in sheets.get(sn, []):
+            if not rec.get("msg_id") or not rec.get("event") or rec.get("event") != boss_name:
                 continue
-            mid = str(row[0])
-            if row[1] != boss_name:
-                continue
+            mid = str(rec["msg_id"])
             if mid not in rows_by_id:
-                rows_by_id[mid] = {"boss_time": row[2] or "", "attendees": []}
-            if row[3]:
-                rows_by_id[mid]["attendees"].append(row[3])
+                rows_by_id[mid] = {"boss_time": rec.get("event_time") or "", "attendees": []}
+            if rec.get("uid"):
+                rows_by_id[mid]["attendees"].append(rec["uid"])
 
         for mid, data in rows_by_id.items():
             bt = data["boss_time"]
@@ -4491,53 +4437,21 @@ def _find_boss_record(boss_name, sheet_name, target_time):
                 best_diff = diff
                 best = (mid, bt, sn, data["attendees"])
 
-    wb.close()
     return best  # (msg_id, boss_time, sheet_name, attendees)
 
 
 def _apply_attendee_edits_excel_sync(action, msg_id, boss_name, boss_time, sheet_name, targets, current_attendees):
-    """수동 추가/제거의 Excel 반영 본체 (스레드에서 실행). 실패 시 오류 문구, 성공 시 None."""
-    wb = load_workbook(EXCEL_PATH)
-    ws = wb[sheet_name] if sheet_name in wb.sheetnames else None
-    if ws is None:
+    """수동 추가/제거 반영 (JSON 원본, 작업 스레드에서 실행). 실패 시 오류 문구, 성공 시 None."""
+    ok = _boss_store().edit_attendees(action, sheet_name, msg_id, boss_name, boss_time, targets,
+                                      now_str=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                      points_fn=calculate_points)
+    if not ok:
         return "❌ 시트를 찾을 수 없어요."
-
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
     total = len(current_attendees)
     for attendee_uid, attendee_display in targets:
-        if action == "add":
-            next_row = ws.max_row + 1
-            ws.cell(row=next_row, column=1, value=msg_id).number_format = "@"
-            ws.cell(row=next_row, column=2, value=boss_name)
-            ws.cell(row=next_row, column=3, value=boss_time)
-            ws.cell(row=next_row, column=4, value=attendee_uid)   # col4 = UID
-            ws.cell(row=next_row, column=5, value=now_str)
-            ws.cell(row=next_row, column=6, value=attendee_display)  # col6 = 이름
-            total += 1
-            log.info(rb_att.attend_log_line("참석", f"{boss_name} {boss_time}",
-                                            msg_id, attendee_display, attendee_uid, total))
-        else:  # remove
-            for row_idx in range(ws.max_row, 1, -1):
-                row_data = [ws.cell(row=row_idx, column=c).value for c in range(1, 7)]
-                if str(row_data[0]) == msg_id and str(row_data[3]) == str(attendee_uid):
-                    ws.delete_rows(row_idx)
-                    break
-            total = max(0, total - 1)
-            log.info(rb_att.attend_log_line("취소", f"{boss_name} {boss_time}",
-                                            msg_id, attendee_display, attendee_uid, total))
-
-    apply_border_all(ws)
-    auto_column_width(ws)
-    update_history_sheet(wb)
-    update_boss_attendance_sheet(wb)
-    update_stats_sheet(wb)
-    reorder_sheets(wb)
-    save_ok, save_err = save_workbook_safely_sync(wb, EXCEL_PATH, "보스 데이터")
-    if not save_ok:
-        return f"❌ 저장 실패: {save_err}"
-    backup_excel()
-    _warm_attend_mirror()
+        total = total + 1 if action == "add" else max(0, total - 1)
+        log.info(rb_att.attend_log_line("참석" if action == "add" else "취소", f"{boss_name} {boss_time}",
+                                        msg_id, attendee_display, attendee_uid, total))
     return None
 
 
@@ -4875,14 +4789,14 @@ async def remove(ctx, *, args: str = ""):
 
 @bot.hybrid_command()
 async def fixid(ctx):
-    if not os.path.exists(EXCEL_PATH):
+    if not _has_boss_data():
         await ctx.send("❌ 저장된 데이터가 없어요!")
         return
     try:
         await ctx.send("⏳ Discord 채널 스캔 + ID 발급 중...")
         message_map = await build_message_map_from_channel()
         async with excel_lock:
-            wb = load_workbook(EXCEL_PATH)
+            wb = _wb_from_store()
             auto_migrate_excel(wb)
             fixed_count = fix_missing_ids(wb, message_map)
             if fixed_count == 0:
@@ -4892,7 +4806,7 @@ async def fixid(ctx):
             update_boss_attendance_sheet(wb)
             update_stats_sheet(wb)
             reorder_sheets(wb)
-            save_ok, save_err = await save_workbook_safely(wb, EXCEL_PATH, "보스 데이터")
+            save_ok, save_err = _commit_wb(wb)
             if not save_ok:
                 await ctx.send(f"❌ 저장 실패: {save_err}")
                 return
@@ -4971,13 +4885,13 @@ async def reopen(ctx, date_time_str: str, minutes: int = 20):
 @bot.hybrid_command()
 async def rename(ctx, old_name: str, new_name: str):
     """참석자 이름 일괄 변경. 예: /rename 기존닉네임 새닉네임"""
-    if not os.path.exists(EXCEL_PATH):
+    if not _has_boss_data():
         await ctx.send("❌ 저장된 데이터가 없어요!")
         return
     try:
         await ctx.send(f"⏳ **{old_name}** → **{new_name}** 변경 중...")
         async with excel_lock:
-            wb = load_workbook(EXCEL_PATH)
+            wb = _wb_from_store()
             changed_count = 0
 
             for sheet_name in wb.sheetnames:
@@ -4999,7 +4913,7 @@ async def rename(ctx, old_name: str, new_name: str):
             update_boss_attendance_sheet(wb)
             update_stats_sheet(wb)
             reorder_sheets(wb)
-            save_ok, save_err = await save_workbook_safely(wb, EXCEL_PATH, "보스 데이터")
+            save_ok, save_err = _commit_wb(wb)
             if not save_ok:
                 await ctx.send(f"❌ 저장 실패: {save_err}")
                 return
@@ -5021,11 +4935,11 @@ async def restart(ctx, *, flags: str = ""):
             except Exception: pass
     log.info(f"[restart] silent={silent} | 시작")
     await _say(f"🔄 **데이터 저장 후 재시작합니다...** `{datetime.now().strftime('%Y-%m-%d %H:%M')}`")
-    if os.path.exists(EXCEL_PATH):
+    if _has_boss_data():
         message_map = await build_message_map_from_channel()
         async with excel_lock:
             try:
-                wb = load_workbook(EXCEL_PATH)
+                wb = _wb_from_store()
                 auto_migrate_excel(wb)
                 fix_missing_ids(wb, message_map)
                 for sheet_name in wb.sheetnames:
@@ -5035,7 +4949,7 @@ async def restart(ctx, *, flags: str = ""):
                 update_boss_attendance_sheet(wb)
                 update_stats_sheet(wb)
                 reorder_sheets(wb)
-                save_ok, save_err = await save_workbook_safely(wb, EXCEL_PATH, "보스 데이터")
+                save_ok, save_err = _commit_wb(wb)
                 if save_ok:
                     backup_excel()
                 else:
@@ -5058,27 +4972,18 @@ async def restart(ctx, *, flags: str = ""):
 
 @bot.hybrid_command()
 async def save(ctx):
-    if not os.path.exists(EXCEL_PATH):
+    if not _has_boss_data():
         await ctx.send("❌ 저장된 데이터가 없어요!")
         return
     try:
         message_map = await build_message_map_from_channel()
         async with excel_lock:
-            wb = load_workbook(EXCEL_PATH)
-            auto_migrate_excel(wb)
-            fix_missing_ids(wb, message_map)
-            for sheet_name in wb.sheetnames:
-                if sheet_name not in SYSTEM_SHEETS:
-                    reapply_raw_sheet_format(wb[sheet_name])
-            update_history_sheet(wb)
-            update_boss_attendance_sheet(wb)
-            update_stats_sheet(wb)
-            reorder_sheets(wb)
-            save_ok, save_err = await save_workbook_safely(wb, EXCEL_PATH, "보스 데이터")
+            # JSON 원본을 정리·반영한 뒤 엑셀로 만들어 보냄 (PC 파일도 함께 최신화)
+            save_ok, save_err, _, _ = await asyncio.to_thread(
+                _tidy_and_export_sync, message_map, map_user_ids=False)
             if not save_ok:
                 await ctx.send(f"❌ 저장 실패: {save_err}")
                 return
-            backup_excel()
     except Exception as e:
         await ctx.send(f"❌ 데이터 저장 실패: {e}")
         return
@@ -5819,10 +5724,10 @@ def verify_and_fix_from_logs(days=7):
         log_attendees[msg_id] = [n2u.get(n, n) for n in attendees_names]
 
     # 4. Excel 데이터와 비교 + 보정
-    if not os.path.exists(EXCEL_PATH):
+    if not _has_boss_data():
         return 0
 
-    wb = load_workbook(EXCEL_PATH)
+    wb = _wb_from_store()
     planned_fixes = {}
 
     for msg_id, log_att in log_attendees.items():
@@ -5864,8 +5769,8 @@ def verify_and_fix_from_logs(days=7):
     # 실제 보정: 로그에만 있는 누락 참석자가 있는 메시지에 대해서만 Excel 업데이트
     for msg_id, merged_att in planned_fixes.items():
         excel_att = []
-        if os.path.exists(EXCEL_PATH):
-            wb_check = load_workbook(EXCEL_PATH)
+        if _has_boss_data():
+            wb_check = _wb_from_store()
             for sheet_name in wb_check.sheetnames:
                 if sheet_name in SYSTEM_SHEETS:
                     continue
@@ -5901,54 +5806,17 @@ def verify_and_fix_from_logs(days=7):
 
 
 def _sync_save_to_excel(message_id, boss_name, boss_time, attendees, created_date):
-    """동기적으로 Excel에 참석자 저장 (로그 검증용). attendees는 이름 또는 UID 리스트."""
-    today = created_date
-    if not os.path.exists(EXCEL_PATH):
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = today
-        apply_header(ws, RAW_HEADERS)
-    else:
-        wb = load_workbook(EXCEL_PATH)
-
-    if today not in wb.sheetnames:
-        ws = wb.create_sheet(today)
-        apply_header(ws, RAW_HEADERS)
-    else:
-        ws = wb[today]
-
-    str_message_id = str(message_id)
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    """참석자 보강 저장 (로그 검증용, 동기). attendees는 이름 또는 UID 리스트."""
     n2u = _name_to_uid_mapping()
     id2n = _load_id_to_name_mapping()
-
-    if not attendees:
-        next_row = ws.max_row + 1
-        ws.cell(row=next_row, column=1, value=str_message_id).number_format = '@'
-        ws.cell(row=next_row, column=2, value=boss_name)
-        ws.cell(row=next_row, column=3, value=boss_time)
-        ws.cell(row=next_row, column=4, value="")
-        ws.cell(row=next_row, column=5, value=now_str)
-    else:
-        for attendee in attendees:
-            # 이름이면 UID로 변환, 이미 UID면 그대로
-            uid = n2u.get(str(attendee), str(attendee)) if not str(attendee).isdigit() else str(attendee)
-            display = id2n.get(uid, str(attendee))
-            next_row = ws.max_row + 1
-            ws.cell(row=next_row, column=1, value=str_message_id).number_format = '@'
-            ws.cell(row=next_row, column=2, value=boss_name)
-            ws.cell(row=next_row, column=3, value=boss_time)
-            ws.cell(row=next_row, column=4, value=uid)      # col4 = UID
-            ws.cell(row=next_row, column=5, value=now_str)
-            ws.cell(row=next_row, column=6, value=display)  # col6 = 이름
-            ws.cell(row=next_row, column=7, value=calculate_points(boss_name, boss_time))
-
-    save_ok, save_err = save_workbook_safely_sync(wb, EXCEL_PATH, "보스 데이터")
-    wb.close()
-    if save_ok:
-        backup_excel()
-    else:
-        log.info(f"[동기 저장 실패] {save_err}")
+    uids = [str(a) if str(a).isdigit() else n2u.get(str(a), str(a)) for a in (attendees or [])]
+    names = {u: id2n.get(u, str(a)) for u, a in zip(uids, attendees or [])}
+    try:
+        _boss_store().upsert_attendance(
+            created_date, message_id, boss_name, boss_time, uids, id_to_name=names,
+            points_fn=calculate_points, now_str=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    except Exception as e:
+        log.info(f"[동기 저장 실패] {e}")
 
 
 async def recover_missing_from_channel():
@@ -5959,8 +5827,8 @@ async def recover_missing_from_channel():
 
     # Excel에 있는 메시지 ID 수집
     existing_ids = set()
-    if os.path.exists(EXCEL_PATH):
-        wb = load_workbook(EXCEL_PATH)
+    if _has_boss_data():
+        wb = _wb_from_store()
         for sheet_name in wb.sheetnames:
             if sheet_name in SYSTEM_SHEETS:
                 continue
@@ -6052,29 +5920,19 @@ async def daily_refresh():
         except Exception as e:
             log.info(f"[로그 검증 오류] {e}")
 
-        if not os.path.exists(EXCEL_PATH):
+        if not _has_boss_data():
             continue
 
         guild_updated = await update_mapping_from_guild(bot.guilds[0] if bot.guilds else None)
         message_map = await build_message_map_from_channel()
         async with excel_lock:
             try:
-                wb = load_workbook(EXCEL_PATH)
-                auto_migrate_excel(wb)
-                fix_missing_ids(wb, message_map)
-                for sheet_name in wb.sheetnames:
-                    if sheet_name not in SYSTEM_SHEETS:
-                        reapply_raw_sheet_format(wb[sheet_name])
-                mapped_count = apply_user_id_mapping(wb)
-                update_history_sheet(wb)
-                update_boss_attendance_sheet(wb)
-                update_stats_sheet(wb)
-                reorder_sheets(wb)
-                save_ok, save_err = await save_workbook_safely(wb, EXCEL_PATH, "보스 데이터")
+                # JSON 원본 정리·반영 → 엑셀로 내보내 PC 파일 최신화 + 디스코드 전송
+                save_ok, save_err, _, mapped_count = await asyncio.to_thread(
+                    _tidy_and_export_sync, message_map)
                 if not save_ok:
                     log.info(f"[일일정리 저장 실패] {save_err}")
                     continue
-                backup_excel()
                 backup_excel_daily_snapshot()  # 자정 일자별 스냅샷 (최대 30일 보관)
                 log.info(f"[일일정리] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 완료")
 
