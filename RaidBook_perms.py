@@ -8,7 +8,7 @@
                (정도운영진·슈퍼맨운영진 같은 ○○운영진 역할은 표시용이라 아님)
   서버마스터   '서버마스터' 역할(master_role_names·master_role_ids) 또는 서버 주인 — 프로그램을 직접 조작하는 기능
                (재시작·저장·스케줄·데이터 수정·/인증권한·Watchdog). 서버마스터는 운영진 기능도 모두 쓸 수 있음
-  운영진·요청자 운영진은 바로 통과, 아니면 버튼 안에서 요청자 본인인지 확인 (전투지원 ⏹️ 전투종료)
+  요청자       누구나 들어오고, 버튼 안에서 요청한 본인인지 확인 — 운영진도 안 됨 (전투지원 ⏹️ 전투종료)
   참석자       누구나 들어오고, 버튼 안에서 그 보스 참석자인지 확인 (입찰)
 
 입구
@@ -26,9 +26,9 @@ import discord
 NONE = "NONE"
 STAFF = "운영진"
 OWNER = "서버마스터"   # 프로그램 관리자 (이름은 예전 그대로 OWNER)
-STAFF_OR_REQUESTER = "운영진·요청자"
+REQUESTER = "요청자"
 ATTENDEE = "참석자"
-LEVELS = (NONE, STAFF, OWNER, STAFF_OR_REQUESTER, ATTENDEE)
+LEVELS = (NONE, STAFF, OWNER, REQUESTER, ATTENDEE)
 _ALIASES = {"누구나": NONE, "none": NONE, "서버주인": OWNER, "주인": OWNER}
 
 STAFF_ROLE_NAME = "운영진"
@@ -92,7 +92,7 @@ COMPONENTS = {
     "combat_voicecheck": (STAFF, "인원체크"),
     "combat_attendee_add": (STAFF, "인원 추가"),
     "combat_attendee_remove": (STAFF, "인원 제거"),
-    "combat_end": (STAFF_OR_REQUESTER, "전투종료"),
+    "combat_end": (REQUESTER, "전투종료"),
     # 🔐 #인증
     "rb_verify:open": (NONE, "비밀번호 입력"),
     # 🎵 음악 패널
@@ -208,8 +208,8 @@ def component_level(custom_id):
 
 
 def allowed(level, member) -> bool:
-    """이 타입을 이 사람이 바로 쓸 수 있는지. 운영진·요청자/참석자는 입구에서 통과시키고 버튼 안에서 마저 확인."""
-    if level is None or level in (NONE, STAFF_OR_REQUESTER, ATTENDEE):
+    """이 타입을 이 사람이 바로 쓸 수 있는지. 요청자/참석자는 입구에서 통과시키고 버튼 안에서 마저 확인."""
+    if level is None or level in (NONE, REQUESTER, ATTENDEE):
         return True
     if level == STAFF:
         return is_staff(member)

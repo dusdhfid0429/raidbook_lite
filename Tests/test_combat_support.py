@@ -211,7 +211,7 @@ def test_view_buttons_and_end_permission():
             def __init__(self, i):
                 self.id = i
         rec = {"requester_id": "5"}
-        assert obj.can_end(U(1), rec) and obj.can_end(U(5), rec) and not obj.can_end(U(7), rec)
+        assert not obj.can_end(U(1), rec) and obj.can_end(U(5), rec) and not obj.can_end(U(7), rec)   # 요청자 본인만
     asyncio.run(run())
 
 

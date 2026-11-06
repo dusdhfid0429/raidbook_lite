@@ -465,8 +465,8 @@ class CombatSupport:
         return rec
 
     def can_end(self, user, rec) -> bool:
-        """전투종료: 운영진 또는 요청한 사람."""
-        return self.is_admin(user) or str(getattr(user, "id", "")) == str((rec or {}).get("requester_id"))
+        """전투종료: 요청한 사람 본인만 (권한 타입 '요청자', 2026-11-06 동훈님 — 운영진도 안 됨)."""
+        return str(getattr(user, "id", "")) == str((rec or {}).get("requester_id"))
 
     async def edit_attendees(self, message, add=(), remove=()):
         async with self._locks[message.id]:
@@ -562,7 +562,7 @@ class CombatView(rb_perms.GuardedView):
         await interaction.response.defer(ephemeral=True)
         rec = self.cs.store.get(interaction.message.id)
         if not self.cs.can_end(interaction.user, rec):
-            await interaction.followup.send("⛔ 전투종료는 운영진이나 요청한 사람만 할 수 있어요.", ephemeral=True)
+            await interaction.followup.send("⛔ 전투종료는 요청한 사람만 할 수 있어요.", ephemeral=True)
             return
         try:
             result = await self.cs.end(interaction.message, interaction.user)

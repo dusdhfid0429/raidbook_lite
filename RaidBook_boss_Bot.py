@@ -3670,6 +3670,11 @@ async def cmd_combat_support(interaction: discord.Interaction):
     if not combat_support.settings.enabled:
         await interaction.response.send_message("전투지원 기능이 꺼져 있어요.", ephemeral=True)
         return
+    # 전투알림 채널에서만 (2026-11-06 동훈님)
+    alert_cid = combat_support.settings.alert_channel_id
+    if alert_cid and interaction.channel_id != alert_cid:
+        await interaction.response.send_message(f"/전투지원은 전투알림 채널에서 써 주세요 👉 <#{alert_cid}>", ephemeral=True)
+        return
     log.info(f"[명령어] /전투지원 | 사용자: {getattr(interaction.user, 'display_name', interaction.user)}")
     await interaction.response.send_modal(rb_combat.CombatModal(combat_support))
 
