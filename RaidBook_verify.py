@@ -21,6 +21,8 @@ import os
 
 import discord
 
+import RaidBook_perms as rb_perms
+
 from RaidBook_common import write_json_atomic
 
 CHANNEL_KEY = "verify_channel_id"
@@ -423,7 +425,7 @@ class VerifyModal(discord.ui.Modal, title="서버 인증"):
         await self.verifier.submit(interaction, self.password.value)
 
 
-class VerifyView(discord.ui.View):
+class VerifyView(rb_perms.GuardedView):
     def __init__(self, verifier):
         super().__init__(timeout=None)
         self.verifier = verifier

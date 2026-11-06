@@ -4417,7 +4417,11 @@ async def _apply_attendee_edits(action, msg_id, boss_name, boss_time, sheet_name
     return None
 
 
-class _AttendeeEditView(discord.ui.View):
+class _AttendeeEditView(rb_perms.GuardedView):
+    # /add·/remove 확인 화면은 채널에 공개로 뜬다 → 확인·취소도 운영진만 (2026-11-06 전수검사)
+    default_level = rb_perms.STAFF
+    default_what = "참석자 추가·제거 확인"
+
     def __init__(self, action, msg_id, boss_name, boss_time, sheet_name, attendee_uid, attendee_display, current_attendees):
         super().__init__(timeout=60)
         self.action = action

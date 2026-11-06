@@ -174,10 +174,12 @@ async def check_command(interaction) -> bool:
     return False
 
 
-async def check_component(interaction) -> bool:
-    """버튼·선택 입구. 막으면 본인에게만 안내하고 False."""
+async def check_component(interaction, default_level=None, default_what="") -> bool:
+    """버튼·선택 입구. 표에 없는 버튼은 View 의 default_level 로. 막으면 본인에게만 안내하고 False."""
     custom_id = (interaction.data or {}).get("custom_id") or ""
     level, what = component_level(custom_id)
+    if level is None:
+        level, what = default_level, default_what
     if allowed(level, interaction.user):
         return True
     await _deny(interaction, deny_text(level, what or "이 버튼"))
@@ -185,10 +187,13 @@ async def check_component(interaction) -> bool:
 
 
 class GuardedView(discord.ui.View):
-    """상시 버튼 View 의 공용 부모 — 콜백 전에 권한 표부터 확인."""
+    """버튼 View 의 공용 부모 — 콜백 전에 권한 표부터 확인.
+    표에 없는 버튼(자동 custom_id)은 default_level 로 판정 — 공개 채널에 뜨는 1회용 화면은 여기에 타입을 적는다."""
+    default_level = None
+    default_what = "이 버튼"
 
     async def interaction_check(self, interaction) -> bool:
-        return await check_component(interaction)
+        return await check_component(interaction, self.default_level, self.default_what)
 
 
 def table_text() -> str:

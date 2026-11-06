@@ -150,6 +150,36 @@ def test_guarded_views():
     assert "[운영진]" in rp.table_text() and "[누구나]" in rp.table_text()
 
 
+def test_default_level_for_unlisted_buttons():
+    _reset()
+
+    class Resp:
+        def is_done(self):
+            return False
+
+        async def send_message(self, text, ephemeral=False):
+            pass
+
+    def inter(user):
+        return SimpleNamespace(data={"custom_id": "a1b2c3random"}, user=user, response=Resp())
+
+    assert asyncio.run(rp.check_component(inter(FakeMember(5))))                       # 1회용 화면 기본 통과
+    assert not asyncio.run(rp.check_component(inter(FakeMember(5)), rp.STAFF, "확인"))  # default_level 운영진
+    assert asyncio.run(rp.check_component(inter(FakeMember(5, ["운영진"])), rp.STAFF, "확인"))
+
+
+def test_every_persistent_view_is_guarded():
+    """보스봇 add_view 로 등록하는 상시 View 는 모두 GuardedView 자식, /add·/remove 공개 확인 화면은 운영진."""
+    srcs = _sources()
+    boss = srcs["RaidBook_boss_Bot.py"]
+    classes = {m.split(".")[-1] for m in re.findall(r"bot\.add_view\(([\w.]+)\(", boss)}
+    assert classes, "add_view 를 못 찾음"
+    allsrc = "\n".join(srcs.values())
+    for c in classes:
+        assert re.search(rf"class {c}\(rb_perms\.GuardedView\)", allsrc), f"{c} 가 GuardedView 가 아님"
+    assert re.search(r"class _AttendeeEditView\(rb_perms\.GuardedView\):\n(?:.*\n){0,2}\s+default_level = rb_perms\.STAFF", boss)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
