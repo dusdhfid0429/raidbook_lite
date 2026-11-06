@@ -38,6 +38,8 @@ import RaidBook_attendance as rb_att
 import RaidBook_clans as rb_clans
 import RaidBook_combat_support as rb_combat
 import RaidBook_broadcast as rb_broadcast
+import RaidBook_verify as rb_verify
+import RaidBook_verify_perms as rb_vperms
 from RaidBook_boss_data import (
     ensure_loot_sheet as _ensure_loot_sheet_core,
     load_all_loot as _load_all_loot_core,
@@ -334,6 +336,7 @@ CLAN_ROLES = rb_clans.parse_clan_roles(config.get("clan_roles"))
 # 동훈님이 정한 채널(2026-11-05)은 예전 설치판에 한 번만 넣는다 (이후 운영진이 고친 값은 그대로)
 _combat_changed = rb_combat.ensure_section(config, CLAN_ROLES)
 _combat_changed = rb_broadcast.ensure_section(config) or _combat_changed   # 📢 /전파 설정 자리
+_combat_changed = rb_verify.ensure_section(config) or _combat_changed      # 🔐 서버 입장 인증 설정 자리
 if not config.get("_combat_channels_applied"):
     rb_combat.apply_initial_channels(config)
     config["_combat_channels_applied"] = True
@@ -341,7 +344,7 @@ if not config.get("_combat_channels_applied"):
 if _combat_changed:
     try:
         write_json_atomic(CONFIG_PATH, config, log)
-        log.info("[설정] boss_config.json에 전투지원(combat_support)·전파(broadcast) 설정을 추가했어요")
+        log.info("[설정] boss_config.json에 전투지원(combat_support)·전파(broadcast)·인증(verify) 설정을 추가했어요")
     except Exception as e:
         log.info(f"[설정] 전투지원 설정 저장 실패 (이번 실행만 적용): {e}")
 # 구버전 방식: 전리품 공지 메시지의 🔨 경매시작 버튼 → 세팅 입력 → ▶️ 시작 (기본 꺼짐)
@@ -3776,6 +3779,76 @@ combat_support = rb_combat.CombatSupport(
     tts_port=_tts_port_for_combat(), music_port=_music_port_for_combat(), logger=log)
 
 
+def _save_boss_config():
+    try:
+        write_json_atomic(CONFIG_PATH, config, log)
+    except Exception as e:
+        log.warning(f"[설정] boss_config.json 저장 실패: {e}")
+
+
+verifier = rb_verify.Verifier(bot, config, DATA_DIR, save_config=_save_boss_config,
+                              default_log_channel=lambda: COMMAND_CHANNEL_ID, logger=log)
+
+
+@bot.tree.command(name="인증권한", description="서버 관리자 전용 — 모든 채널을 '인증됨' 역할만 보이게 바꾸거나(미리보기 후 적용) 되돌려요")
+@discord.app_commands.describe(동작="적용(미리보기 후 ✅) 또는 복구(마지막 백업으로 되돌리기)")
+@discord.app_commands.choices(동작=[discord.app_commands.Choice(name="적용", value="apply"),
+                                  discord.app_commands.Choice(name="복구", value="restore")])
+async def cmd_verify_perms(interaction: discord.Interaction, 동작: str = "apply"):
+    member, guild = interaction.user, interaction.guild
+    if guild is None or not isinstance(member, discord.Member):
+        await interaction.response.send_message("서버 안에서만 쓸 수 있어요.", ephemeral=True)
+        return
+    if not (member.id == guild.owner_id or member.guild_permissions.administrator
+            or member.guild_permissions.manage_guild):
+        await interaction.response.send_message("서버 소유자나 '서버 관리' 권한이 있는 사람만 쓸 수 있어요.", ephemeral=True)
+        return
+    log.info(f"[명령어] /인증권한 {동작} | 사용자: {member.display_name}")
+    verifier.reload()
+    if 동작 == "restore":
+        path = rb_vperms.latest_backup(DATA_DIR)
+        if not path:
+            await interaction.response.send_message("되돌릴 백업이 없어요.", ephemeral=True)
+            return
+        await interaction.response.send_message(f"⏳ `{os.path.basename(path)}` 백업으로 채널 권한을 되돌리는 중…", ephemeral=True)
+        ok, fails = await rb_vperms.restore(guild, path)
+        log.info(f"[인증권한] 복구 {ok}개, 실패 {len(fails)} ({path}) by {member}")
+        await interaction.edit_original_response(
+            content=f"↩️ 채널 {ok}개 권한을 되돌렸어요." + (f"\n⚠️ 실패: {', '.join(fails)[:1500]}" if fails else ""))
+        return
+    role = verifier.find_role(guild)
+    if role is None:
+        await interaction.response.send_message("'인증됨' 역할이 아직 없어요. 보스봇을 다시 시작하면 만들어져요.", ephemeral=True)
+        return
+    if not config.get(rb_verify.EXISTING_FLAG):
+        await interaction.response.send_message(
+            "기존 멤버 일괄 인증이 아직 안 끝났어요. 그 전에 적용하면 모두 채널이 안 보이게 돼서 막아 뒀어요. "
+            "보스봇 시작 안내에서 '기존 멤버 …명에게 역할을 줬어요'를 확인한 뒤 다시 해 주세요.", ephemeral=True)
+        return
+    if not guild.me.guild_permissions.manage_roles:
+        await interaction.response.send_message("봇에 '역할 관리' 권한이 없어 채널 권한을 바꿀 수 없어요.", ephemeral=True)
+        return
+    keep, vcid = verifier.settings.keep_role_suffix, verifier.settings.channel_id
+    plan = rb_vperms.build_plan(guild, role, keep, vcid)
+    if not plan:
+        await interaction.response.send_message("✅ 이미 모든 채널이 인증 권한으로 맞춰져 있어요.", ephemeral=True)
+        return
+
+    async def _apply(btn_interaction):
+        await btn_interaction.edit_original_response(
+            content="⏳ 권한을 백업하고 적용하는 중… (채널이 많으면 1~2분 걸려요)", view=None)
+        path = rb_vperms.save_backup(DATA_DIR, guild, log)
+        fresh = rb_vperms.build_plan(guild, role, keep, vcid)
+        ok, fails = await rb_vperms.apply_plan(fresh)
+        log.info(f"[인증권한] 적용 {ok}개, 실패 {len(fails)} (백업 {path}) by {member}")
+        await btn_interaction.edit_original_response(
+            content=f"🔐 채널 {ok}개에 인증 권한을 적용했어요. 되돌리려면 `/인증권한 복구`"
+                    + (f"\n⚠️ 실패(봇 역할 순서·권한 확인): {', '.join(fails)[:1500]}" if fails else ""))
+
+    await interaction.response.send_message(rb_vperms.preview_text(plan, role, keep, vcid),
+                                            view=rb_vperms.ConfirmView(member.id, _apply), ephemeral=True)
+
+
 @bot.tree.command(name="전투지원", description="전투지원 요청 — 내용을 적으면 전투알림 채널에 올리고 혈맹 대화방에 음성으로 알려요")
 async def cmd_combat_support(interaction: discord.Interaction):
     if not combat_support.settings.enabled:
@@ -6076,14 +6149,25 @@ async def _ensure_boss_channels():
     """없는 채널 자동 생성 후 채널 전역값을 갱신. 결과 안내 문자열 목록 반환."""
     global ALERT_CHANNEL_ID, COMMAND_CHANNEL_ID, LOOT_CHANNEL_ID, AUCTION_CHANNEL_ID, VOICE_CHANNEL_IDS
     from RaidBook_channel_setup import ChannelSpec, ensure_channels, resolve_guild
-    keys = ["alert_channel_id", "command_channel_id", "loot_channel_id", "auction_channel_id", "voice_channel_ids", rb_combat.ALERT_CHANNEL_KEY]
+    keys = ["alert_channel_id", "command_channel_id", "loot_channel_id", "auction_channel_id", "voice_channel_ids", rb_combat.ALERT_CHANNEL_KEY,
+            rb_verify.CHANNEL_KEY]
     guild = resolve_guild(bot, config, keys)
+    if verifier.settings.enabled and not config.get(rb_verify.CHANNEL_KEY) and guild is not None:
+        # 운영진이 미리 만들어 둔 #인증 채널(카테고리 밖 포함)이 있으면 그걸 쓴다 — 중복 생성 방지
+        _pre = discord.utils.get(guild.text_channels, name=rb_verify.CHANNEL_NAME)
+        if _pre is not None:
+            config[rb_verify.CHANNEL_KEY] = _pre.id
+            _save_boss_config()
+            verifier.reload()
+            log.info(f"[인증] 기존 #{_pre.name}({_pre.id}) 채널을 인증 채널로 사용")
     specs = [
         ChannelSpec("alert_channel_id", "보탐-알림"),
         ChannelSpec("command_channel_id", "보탐-명령"),
     ]
     if combat_support.settings.enabled:
         specs.append(ChannelSpec(rb_combat.ALERT_CHANNEL_KEY, rb_combat.ALERT_CHANNEL_NAME))
+    if verifier.settings.enabled:
+        specs.append(ChannelSpec(rb_verify.CHANNEL_KEY, rb_verify.CHANNEL_NAME))
     if LOOT_ANNOUNCE:
         specs.append(ChannelSpec("loot_channel_id", "전리품"))
     if LOOT_AUCTION_BUTTON:
@@ -6106,6 +6190,7 @@ async def _ensure_boss_channels():
     VOICE_CHANNEL_IDS = [int(c) for c in (config.get("voice_channel_ids") or []) if c]
     boss_auction.channel_id = AUCTION_CHANNEL_ID
     combat_support.reload()
+    verifier.reload()
     notes = [f"🆕 <#{ids[0]}> 채널을 만들었어요 (`{key}`)" for key, ids in created.items()
              if key not in replaced]
     moved = created.get("auction_channel_id")
@@ -6153,6 +6238,13 @@ async def initialize_on_ready():
     bot.add_view(BoardView(boss_auction))  # 경매 진행판 버튼 재시작 복구
     bot.add_view(PendingListView())  # 📌 경매 대기 목록 버튼 재시작 복구
     bot.add_view(rb_combat.CombatView(combat_support))  # ⚔️ 전투지원 알림 버튼 재시작 복구
+    bot.add_view(rb_verify.VerifyView(verifier))  # 🔐 #인증 비밀번호 입력 버튼 재시작 복구
+    try:
+        from RaidBook_channel_setup import resolve_guild
+        channel_notes += await verifier.setup(resolve_guild(bot, config, [rb_verify.CHANNEL_KEY, "alert_channel_id"]))
+    except Exception as e:
+        log.warning(f"[인증] 준비 실패: {type(e).__name__}: {e}")
+        channel_notes.append(f"⚠️ 인증 기능 준비 실패: {e}")
     await boss_auction.restore()
     global _auction_watch_task
     if _auction_watch_task is None or _auction_watch_task.done():
