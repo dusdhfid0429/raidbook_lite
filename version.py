@@ -7,7 +7,7 @@ from datetime import datetime
 # 버전 정보
 VERSION_MAJOR = 1
 VERSION_MINOR = 0
-VERSION_PATCH = 45
+VERSION_PATCH = 46
 VERSION_BUILD = 1
 
 # 버전 문자열
@@ -15,8 +15,8 @@ VERSION = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}"
 VERSION_FULL = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}.{VERSION_BUILD}"
 
 # 릴리즈 정보
-RELEASE_DATE = "2026-11-06"
-RELEASE_NAME = "Lite - 버튼 반응 속도 개선 + 보스 데이터 JSON 저장 (엑셀은 /save·일일 정리 때 변환)"
+RELEASE_DATE = "2026-11-07"
+RELEASE_NAME = "Lite - /보스알림: 팝업으로 보스알림 수동 생성"
 RELEASE_CHANNEL = "stable"  # stable, beta, alpha
 
 # 제품 정보
