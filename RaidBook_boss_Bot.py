@@ -6088,6 +6088,14 @@ async def _ensure_boss_channels():
     keys = ["alert_channel_id", "command_channel_id", "loot_channel_id", "auction_channel_id", "voice_channel_ids", rb_combat.ALERT_CHANNEL_KEY,
             rb_verify.CHANNEL_KEY]
     guild = resolve_guild(bot, config, keys)
+    if verifier.settings.enabled and not config.get(rb_verify.CHANNEL_KEY) and guild is not None:
+        # 운영진이 미리 만들어 둔 #인증 채널(카테고리 밖 포함)이 있으면 그걸 쓴다 — 중복 생성 방지
+        _pre = discord.utils.get(guild.text_channels, name=rb_verify.CHANNEL_NAME)
+        if _pre is not None:
+            config[rb_verify.CHANNEL_KEY] = _pre.id
+            _save_boss_config()
+            verifier.reload()
+            log.info(f"[인증] 기존 #{_pre.name}({_pre.id}) 채널을 인증 채널로 사용")
     specs = [
         ChannelSpec("alert_channel_id", "보탐-알림"),
         ChannelSpec("command_channel_id", "보탐-명령"),
