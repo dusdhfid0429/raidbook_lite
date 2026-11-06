@@ -56,15 +56,21 @@ def test_staff_is_exact_role_only():
     assert not rp.is_staff("not a member")
 
 
-def test_owner_only():
+def test_master_role():
     _reset()
-    assert rp.is_owner(FakeMember(OWNER_ID))
+    master = FakeMember(5, ["서버마스터"])
+    assert rp.is_master(master) and rp.is_master(FakeMember(OWNER_ID))       # 서버마스터 역할 또는 서버 주인
+    assert rp.is_staff(master)                                                # 서버마스터는 운영진 기능도
     for m in (FakeMember(5, [], manage=True), FakeMember(5, [], admin=True), FakeMember(5, ["운영진"])):
-        assert not rp.is_owner(m)
-        assert not rp.allowed(rp.command_level("restart"), m)                  # 프로그램 조작 = 서버 주인만
+        assert not rp.is_master(m)
+        assert not rp.allowed(rp.command_level("restart"), m)                  # 프로그램 조작 = 서버마스터만
         assert not rp.allowed(rp.command_level("panel", "watchdog"), m)
         assert not rp.allowed(rp.component_level("wd_panel_restart")[0], m)
-    assert rp.allowed(rp.command_level("인증권한"), FakeMember(OWNER_ID))
+    assert rp.allowed(rp.command_level("인증권한"), master)
+    assert rp.allowed(rp.command_level("restart"), master)
+    rp.configure({"master_role_names": ["관리봇주인"], "master_role_ids": [999]})
+    assert not rp.is_master(master) and rp.is_master(FakeMember(5, ["관리봇주인"]))
+    _reset()
 
 
 def test_levels():
@@ -87,7 +93,7 @@ def test_levels():
 
 def test_admin_role_config_and_overrides():
     rp.configure({"admin_role_names": ["운영진", "부운영"], "admin_role_ids": [777],
-                  "permission_overrides": {"전투지원": "운영진", "boss_loot": "누구나", "재생": "서버주인", "x": "엉터리"}})
+                  "permission_overrides": {"전투지원": "운영진", "boss_loot": "누구나", "재생": "서버마스터", "x": "엉터리"}})
     assert rp.is_staff(FakeMember(5, ["부운영"]))
     m = FakeMember(5, ["정도"])
     m._fake_roles.append(SimpleNamespace(id=777, name="아무거나"))

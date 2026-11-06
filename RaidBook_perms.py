@@ -4,9 +4,10 @@
 
 권한 타입
   NONE         제한 없음 — 누구나 (편의 기능)
-  운영진       '운영진' 역할(admin_role_names·admin_role_ids) 또는 서버 주인
+  운영진       '운영진' 역할(admin_role_names·admin_role_ids), 서버마스터, 또는 서버 주인
                (정도운영진·슈퍼맨운영진 같은 ○○운영진 역할은 표시용이라 아님)
-  서버주인     디스코드 서버 주인만 — 프로그램을 직접 조작하는 기능 (재시작·저장·스케줄·데이터 수정·Watchdog)
+  서버마스터   '서버마스터' 역할(master_role_names·master_role_ids) 또는 서버 주인 — 프로그램을 직접 조작하는 기능
+               (재시작·저장·스케줄·데이터 수정·/인증권한·Watchdog). 서버마스터는 운영진 기능도 모두 쓸 수 있음
   운영진·요청자 운영진은 바로 통과, 아니면 버튼 안에서 요청자 본인인지 확인 (전투지원 ⏹️ 전투종료)
   참석자       누구나 들어오고, 버튼 안에서 그 보스 참석자인지 확인 (입찰)
 
@@ -24,13 +25,14 @@ import discord
 
 NONE = "NONE"
 STAFF = "운영진"
-OWNER = "서버주인"
+OWNER = "서버마스터"   # 프로그램 관리자 (이름은 예전 그대로 OWNER)
 STAFF_OR_REQUESTER = "운영진·요청자"
 ATTENDEE = "참석자"
 LEVELS = (NONE, STAFF, OWNER, STAFF_OR_REQUESTER, ATTENDEE)
-_ALIASES = {"누구나": NONE, "none": NONE, "서버마스터": OWNER, "주인": OWNER}
+_ALIASES = {"누구나": NONE, "none": NONE, "서버주인": OWNER, "주인": OWNER}
 
 STAFF_ROLE_NAME = "운영진"
+MASTER_ROLE_NAME = "서버마스터"
 
 # ── 명령 (프로그램 → 이름 → 타입) ─────────────────────────────────────────
 COMMANDS = {
@@ -42,7 +44,7 @@ COMMANDS = {
         "create": STAFF, "close": STAFF, "activate": STAFF, "extend": STAFF, "reopen": STAFF,
         "add": STAFF, "remove": STAFF,
         "listboss": STAFF, "listdailyboss": STAFF, "history": STAFF, "stats": STAFF,
-        # 서버주인 — 프로그램 조작 (스케줄·저장·재시작·데이터 수정·서버 권한)
+        # 서버마스터 — 프로그램 조작 (스케줄·저장·재시작·데이터 수정·서버 권한)
         "startboss": OWNER, "stopboss": OWNER, "setboss": OWNER,
         "startdailyboss": OWNER, "stopdailyboss": OWNER, "setrefresh": OWNER,
         "refresh": OWNER, "save": OWNER, "restart": OWNER, "test": OWNER, "delete": OWNER,
@@ -113,6 +115,8 @@ COMPONENTS = {
 
 _admin_role_names = {STAFF_ROLE_NAME}
 _admin_role_ids = set()
+_master_role_names = {MASTER_ROLE_NAME}
+_master_role_ids = set()
 _overrides = {}
 
 
@@ -123,18 +127,24 @@ def _level_name(value):
 
 
 def configure(config):
-    """시작 때 한 번 — boss_config 의 admin_role_names·admin_role_ids·permission_overrides 를 읽는다."""
-    global _admin_role_names, _admin_role_ids, _overrides
+    """시작 때 한 번 — boss_config 의 admin_role_names·admin_role_ids·master_role_names·master_role_ids·
+    permission_overrides 를 읽는다."""
+    global _admin_role_names, _admin_role_ids, _master_role_names, _master_role_ids, _overrides
     config = config if isinstance(config, dict) else {}
-    names = config.get("admin_role_names", [STAFF_ROLE_NAME]) or []
-    _admin_role_names = {str(n).strip() for n in names if str(n).strip()}
-    ids = set()
-    for r in config.get("admin_role_ids") or []:
-        try:
-            ids.add(int(r))
-        except (TypeError, ValueError):
-            pass
-    _admin_role_ids = ids
+
+    def _names(key, default):
+        return {str(n).strip() for n in (config.get(key, [default]) or []) if str(n).strip()}
+
+    def _ids(key):
+        out = set()
+        for r in config.get(key) or []:
+            try:
+                out.add(int(r))
+            except (TypeError, ValueError):
+                pass
+        return out
+    _admin_role_names, _admin_role_ids = _names("admin_role_names", STAFF_ROLE_NAME), _ids("admin_role_ids")
+    _master_role_names, _master_role_ids = _names("master_role_names", MASTER_ROLE_NAME), _ids("master_role_ids")
     raw = config.get("permission_overrides")
     _overrides = {}
     if isinstance(raw, dict):
@@ -155,18 +165,30 @@ def configure_from_file(path, logger=None):
             logger.info(f"[권한] boss_config 읽기 실패 — 기본 권한 표로 동작: {e}")
 
 
-def is_owner(member) -> bool:
+def _is_guild_owner(member) -> bool:
     guild = getattr(member, "guild", None)
     return guild is not None and getattr(member, "id", None) == guild.owner_id
 
 
-def is_staff(member) -> bool:
-    """운영진: 서버 주인 또는 '운영진' 역할(admin_role_names·admin_role_ids)."""
+def _has_role(member, names, ids) -> bool:
+    return any(r.id in ids or str(r.name).strip() in names for r in getattr(member, "roles", []) or [])
+
+
+def is_master(member) -> bool:
+    """서버마스터(프로그램 관리자): '서버마스터' 역할(master_role_names·master_role_ids) 또는 서버 주인."""
     if not isinstance(member, discord.Member):
         return False
-    if is_owner(member):
-        return True
-    return any(r.id in _admin_role_ids or str(r.name).strip() in _admin_role_names for r in member.roles)
+    return _is_guild_owner(member) or _has_role(member, _master_role_names, _master_role_ids)
+
+
+is_owner = is_master   # 예전 이름 호환
+
+
+def is_staff(member) -> bool:
+    """운영진: '운영진' 역할(admin_role_names·admin_role_ids), 서버마스터, 또는 서버 주인."""
+    if not isinstance(member, discord.Member):
+        return False
+    return is_master(member) or _has_role(member, _admin_role_names, _admin_role_ids)
 
 
 def command_level(name, bot="boss"):
@@ -192,12 +214,12 @@ def allowed(level, member) -> bool:
     if level == STAFF:
         return is_staff(member)
     if level == OWNER:
-        return is_owner(member)
+        return is_master(member)
     return False
 
 
 def deny_text(level, what) -> str:
-    who = "서버 주인" if level == OWNER else "운영진"
+    who = "서버마스터" if level == OWNER else "운영진"
     return f"⛔ {what}은(는) {who}만 쓸 수 있어요."
 
 

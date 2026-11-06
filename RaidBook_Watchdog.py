@@ -1068,7 +1068,7 @@ async def on_command_error(ctx, error):
 
 @_wdog_bot.check
 async def _wdog_permission_check(ctx):
-    """! 명령도 공용 권한 표(RaidBook_perms, watchdog) 먼저 — Watchdog 명령은 서버 주인만."""
+    """! 명령도 공용 권한 표(RaidBook_perms, watchdog) 먼저 — Watchdog 명령은 서버마스터만."""
     level = rb_perms.command_level(ctx.command.name, "watchdog")
     if rb_perms.allowed(level if level is not None else rb_perms.OWNER, ctx.author):
         return True
@@ -1244,7 +1244,7 @@ def _save_panel_state(state):
 
 
 def _panel_allowed(interaction) -> bool:
-    """원격 패널: 관리 채널 + 공용 권한 표(RaidBook_perms) — Watchdog 기능은 서버 주인만 (2026-11-06 동훈님)."""
+    """원격 패널: 관리 채널 + 공용 권한 표(RaidBook_perms) — Watchdog 기능은 서버마스터만 (2026-11-06 동훈님)."""
     if interaction.channel_id != ADMIN_CHANNEL_ID:
         return False
     level, _ = rb_perms.component_level((interaction.data or {}).get("custom_id") or "")
@@ -1381,7 +1381,7 @@ class RemotePanelView(rb_perms.GuardedView):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if _panel_allowed(interaction):
             return True
-        await interaction.response.send_message("⛔ 서버 주인만 사용할 수 있습니다.", ephemeral=True)
+        await interaction.response.send_message("⛔ 서버마스터만 사용할 수 있습니다.", ephemeral=True)
         return False
 
     @discord.ui.button(label="상태", emoji="📊", style=discord.ButtonStyle.secondary, custom_id="wd_panel_status", row=0)
