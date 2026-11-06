@@ -4,7 +4,7 @@
 규칙 (채널마다):
   - @everyone       : 보기 끔 (다른 권한 칸은 그대로)
   - 인증됨          : 보기 켬 — 단, 원래 @everyone 보기가 꺼져 있던 비공개 채널은 그대로 숨김
-  - 다른 역할 권한  : 지움. 이름이 verify.keep_role_suffix(기본 '운영진')로 끝나는 역할과
+  - 다른 역할 권한  : 지움. 이름이 verify.keep_role_name(기본 '운영진')인 역할과
                       봇·연동 역할(managed)은 남김
   - 멤버 개별 권한  : 그대로
   - #인증 채널      : @everyone 보기 켬·글쓰기 끔, 인증됨은 숨김
@@ -22,10 +22,10 @@ from RaidBook_common import write_json_atomic
 BACKUP_PREFIX = "verify_perm_backup_"
 
 
-def keep_role(role, keep_suffix) -> bool:
+def keep_role(role, keep_name) -> bool:
     if getattr(role, "managed", False):
         return True
-    return bool(keep_suffix) and str(role.name).strip().endswith(keep_suffix)
+    return bool(keep_name) and str(role.name).strip() == keep_name
 
 
 def _copy(ow):
@@ -35,7 +35,7 @@ def _copy(ow):
     return discord.PermissionOverwrite.from_pair(allow, deny)
 
 
-def plan_channel(channel, everyone, verified, keep_suffix, verify_channel_id):
+def plan_channel(channel, everyone, verified, keep_name, verify_channel_id):
     """채널 하나의 새 권한 계산.
 
     Returns: (new_overwrites dict, removed_role_names list, private bool)
@@ -47,7 +47,7 @@ def plan_channel(channel, everyone, verified, keep_suffix, verify_channel_id):
     for target, perm in old.items():
         if target == everyone or target == verified:
             continue
-        if isinstance(target, discord.Role) and not keep_role(target, keep_suffix):
+        if isinstance(target, discord.Role) and not keep_role(target, keep_name):
             removed.append(target.name)
             continue
         new[target] = perm
@@ -81,11 +81,11 @@ def _same(a, b) -> bool:
     return all(a[k].pair() == b[k].pair() for k in a)
 
 
-def build_plan(guild, verified, keep_suffix, verify_channel_id):
+def build_plan(guild, verified, keep_name, verify_channel_id):
     """[(channel, new_overwrites, removed, private)] — 바뀌는 채널만."""
     out = []
     for ch in all_channels(guild):
-        new, removed, private = plan_channel(ch, guild.default_role, verified, keep_suffix, verify_channel_id)
+        new, removed, private = plan_channel(ch, guild.default_role, verified, keep_name, verify_channel_id)
         if not _same(new, dict(ch.overwrites)):
             out.append((ch, new, removed, private))
     return out
@@ -97,7 +97,7 @@ def _label(ch):
     return f"<#{ch.id}>"
 
 
-def preview_text(plan, verified, keep_suffix, verify_channel_id) -> str:
+def preview_text(plan, verified, keep_name, verify_channel_id) -> str:
     cats = sum(1 for ch, *_ in plan if isinstance(ch, discord.CategoryChannel))
     chans = len(plan) - cats
     role_counts = {}
@@ -114,7 +114,7 @@ def preview_text(plan, verified, keep_suffix, verify_channel_id) -> str:
         lines.append(f"• 지울 역할 권한 (채널 수): {rc[:900]}")
     else:
         lines.append("• 지울 역할 권한 없음")
-    keep = f"'{keep_suffix}'로 끝나는 역할, " if keep_suffix else ""
+    keep = f"'{keep_name}' 역할, " if keep_name else ""
     lines.append(f"• 유지: {keep}봇·연동 역할, 멤버 개별 권한")
     if private:
         lines.append(f"• 비공개 채널은 {verified.name}에게 열지 않아요: {' '.join(private)[:700]}")

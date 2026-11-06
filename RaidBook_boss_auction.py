@@ -30,6 +30,8 @@ import time
 from datetime import datetime
 
 import discord
+
+import RaidBook_perms as rb_perms
 from discord import ui
 
 from RaidBook_common import write_json_atomic
@@ -894,7 +896,7 @@ class AuctionSetupModal(ui.Modal, title="경매 세팅"):
         await interaction.followup.send(text, ephemeral=True)
 
 
-class AuctionView(ui.View):
+class AuctionView(rb_perms.GuardedView):
     """경매 메시지 버튼 (persistent). 상태: ready / active / closed."""
 
     def __init__(self, auction: BossAuction, state="ready", locked=False):
@@ -1622,7 +1624,7 @@ def build_board_embed(board, currency="", now=None):
     return embed
 
 
-class BoardView(ui.View):
+class BoardView(rb_perms.GuardedView):
     """경매 진행판 버튼 (persistent): ▶️ 경매시작 (관리자, 아이템마다) / 🙋 입찰 / ⏹️ 종료 (관리자)
     / 🔁 유찰 재경매 (관리자, 끝난 뒤 유찰 아이템만 새 진행판으로)."""
 

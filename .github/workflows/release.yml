@@ -53,6 +53,7 @@ jobs:
           python Tests/test_clans.py
           python Tests/test_combat_support.py
           python Tests/test_boss_manual.py
+          python Tests/test_perms.py
 
       - name: Install Inno Setup
         shell: pwsh

@@ -32,6 +32,7 @@ from datetime import datetime, timedelta, timezone
 import discord
 from discord.ext import commands as dc_commands
 from RaidBook_common import DailyFileHandler
+import RaidBook_perms as rb_perms
 from config_helper import (
     ensure_config_from_template,
     ensure_runtime_tree,
@@ -866,6 +867,7 @@ _wdog_intents = discord.Intents.default()
 _wdog_intents.message_content = True
 _wdog_intents.members = True
 _wdog_bot = dc_commands.Bot(command_prefix="!", intents=_wdog_intents)
+rb_perms.configure_from_file(get_config_path("boss_config.json"), log)  # 🛡️ 공용 권한 표 기준
 _wdog_ready_announced = False
 _wdog_slash_synced = False
 _discord_loop = None   # Discord 봇 이벤트 루프 참조 (재시작 시 사용)
@@ -1050,11 +1052,27 @@ async def on_command_error(ctx, error):
     if isinstance(error, dc_commands.CommandNotFound):
         log.info(f"[Watchdog Discord] 알 수 없는 명령어: {ctx.message.content[:80]}")
         return
+    if isinstance(error, dc_commands.CheckFailure):
+        log.info(f"[Watchdog Discord] 권한 없음: {ctx.author} {ctx.message.content[:80]}")
+        try:
+            await ctx.send(str(error))
+        except Exception:
+            pass
+        return
     log.error(f"[Watchdog Discord] 명령 처리 오류: {error}", exc_info=True)
     try:
         await ctx.send(f"❌ 명령 처리 중 오류가 발생했습니다: {error}")
     except Exception:
         pass
+
+
+@_wdog_bot.check
+async def _wdog_permission_check(ctx):
+    """! 명령도 공용 권한 표(RaidBook_perms, watchdog) 먼저 — Watchdog 명령은 서버마스터만."""
+    level = rb_perms.command_level(ctx.command.name, "watchdog")
+    if rb_perms.allowed(level if level is not None else rb_perms.OWNER, ctx.author):
+        return True
+    raise dc_commands.CheckFailure(rb_perms.deny_text(level or rb_perms.OWNER, f"!{ctx.command.name}"))
 
 
 @_wdog_bot.command(name="watchdog", aliases=["wd"])
@@ -1205,8 +1223,6 @@ async def _boss_fwd(ctx, cmd: str = None, *args):
 
 _PANEL_STATE_PATH = os.path.join(BASE_DIR, "Data", "watchdog_panel.json")
 _PANEL_REFRESH_SEC = 60
-_PANEL_ADMIN_ROLE_IDS = {int(x) for x in (config.get("admin_role_ids") or []) if str(x).isdigit()}
-_PANEL_ADMIN_USER_IDS = {int(x) for x in (config.get("admin_user_ids") or []) if str(x).isdigit()}
 _panel_refresh_task = None
 
 
@@ -1228,18 +1244,11 @@ def _save_panel_state(state):
 
 
 def _panel_allowed(interaction) -> bool:
+    """원격 패널: 관리 채널 + 공용 권한 표(RaidBook_perms) — Watchdog 기능은 서버마스터만 (2026-11-06 동훈님)."""
     if interaction.channel_id != ADMIN_CHANNEL_ID:
         return False
-    member = interaction.user
-    if member.id in _PANEL_ADMIN_USER_IDS:
-        return True
-    guild = interaction.guild
-    if guild is not None and member.id == guild.owner_id:
-        return True
-    perms = getattr(member, "guild_permissions", None)
-    if perms is not None and (perms.administrator or perms.manage_guild):
-        return True
-    return any(r.id in _PANEL_ADMIN_ROLE_IDS for r in getattr(member, "roles", []))
+    level, _ = rb_perms.component_level((interaction.data or {}).get("custom_id") or "")
+    return rb_perms.allowed(level or rb_perms.OWNER, interaction.user)
 
 
 def _fmt_uptime(start_time):
@@ -1327,7 +1336,10 @@ async def _panel_bot_action(interaction, action):
     await interaction.followup.send(f"{done} (요청: {interaction.user.display_name})", ephemeral=True)
 
 
-class _UpdateConfirmView(discord.ui.View):
+class _UpdateConfirmView(rb_perms.GuardedView):
+    default_level = rb_perms.OWNER
+    default_what = "업데이트 설치"
+
     def __init__(self, release_info, download_url):
         super().__init__(timeout=300)
         self.release_info = release_info
@@ -1360,14 +1372,16 @@ class _UpdateConfirmView(discord.ui.View):
                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
-class RemotePanelView(discord.ui.View):
+class RemotePanelView(rb_perms.GuardedView):
+    default_level = rb_perms.OWNER
+
     def __init__(self):
         super().__init__(timeout=None)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if _panel_allowed(interaction):
             return True
-        await interaction.response.send_message("⛔ 서버 관리자만 사용할 수 있습니다.", ephemeral=True)
+        await interaction.response.send_message("⛔ 서버마스터만 사용할 수 있습니다.", ephemeral=True)
         return False
 
     @discord.ui.button(label="상태", emoji="📊", style=discord.ButtonStyle.secondary, custom_id="wd_panel_status", row=0)

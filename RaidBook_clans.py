@@ -92,14 +92,6 @@ def format_clan_counts(groups, unassigned) -> str:
     return " · ".join(parts)
 
 
-STAFF_ROLE_SUFFIX = "운영진"
-
-
-def is_staff_role(role_name) -> bool:
-    """각 혈맹 운영진 역할인지 — 이름이 '운영진'으로 끝나면 (운영진, 슈퍼맨운영진, 썰자운영진 …)."""
-    return str(role_name or "").strip().endswith(STAFF_ROLE_SUFFIX)
-
-
 def format_headcount(channel_name, time_text, total, groups, unassigned) -> str:
     """/인원현황 메시지 — 혈맹별 '⚔️ 정도 (5명)' 아래 닉네임만 ' · '로 (보스 알림과 같은 short_name).
     0명 혈맹은 제목 줄만, 미지정은 있을 때만. 혈맹 구분을 안 쓰면 groups=None → 전체 명단 한 줄."""

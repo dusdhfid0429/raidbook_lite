@@ -6,21 +6,19 @@
 설정은 boss_config.json 의 broadcast:
   enabled         켜기/끄기
   channel_ids     /전파를 쓸 수 있는 채널 ID 목록 (비면 모든 채널)
-  role_suffix     이 글자로 끝나는 역할을 가진 사람만 사용 (기본 '운영진' → 정도운영진·슈퍼맨운영진 …)
   max_length      글자 수 제한 (넘으면 앞부분만)
   tts_template    읽을 문장 ({name}=닉네임, {content}=내용)
 """
 import RaidBook_clans as rb_clans
 
 DEFAULT_MAX_LENGTH = 50
-DEFAULT_ROLE_SUFFIX = "운영진"
 DEFAULT_TEMPLATE = "{name}님 전달. {content}"
 # 동훈님이 정한 전파 채널 (2026-11-05)
 INITIAL_CHANNEL = 1567863699484577942
 
 SECTION_COMMENT = (
     "/전파 설정. channel_ids = /전파를 쓸 수 있는 채널 ID 목록(비면 모든 채널), "
-    "role_suffix = 이 글자로 끝나는 역할이 있는 사람만 사용(기본 운영진 → 정도운영진·슈퍼맨운영진 등), "
+    "누가 쓸 수 있는지는 권한 표(RaidBook_perms, 운영진)에서 정해요. "
     "max_length = 글자 수 제한, tts_template = 읽을 문장({name}=닉네임, {content}=내용). "
     "읽어 줄 대화방은 combat_support.tts_channel_ids 를 같이 써요. 고친 뒤 보스봇을 다시 시작하세요."
 )
@@ -38,7 +36,6 @@ def default_section() -> dict:
     return {
         "enabled": True,
         "channel_ids": [INITIAL_CHANNEL],
-        "role_suffix": DEFAULT_ROLE_SUFFIX,
         "max_length": DEFAULT_MAX_LENGTH,
         "tts_template": DEFAULT_TEMPLATE,
     }
@@ -52,11 +49,15 @@ def ensure_section(config) -> bool:
         config["broadcast"] = default_section()
         changed = True
     else:
+        # 예전 role_suffix('운영진'으로 끝나는 역할) 칸은 없앤다 — 권한은 RaidBook_perms 권한 표 (2026-11-06)
+        if "role_suffix" in sec:
+            sec.pop("role_suffix")
+            changed = True
         for k, v in default_section().items():
             if k not in sec:
                 sec[k] = v
                 changed = True
-    if "_broadcast_comment" not in config:
+    if config.get("_broadcast_comment") != SECTION_COMMENT:
         config["_broadcast_comment"] = SECTION_COMMENT
         changed = True
     return changed
@@ -69,8 +70,6 @@ class Settings:
         raw = sec.get("channel_ids")
         raw = raw if isinstance(raw, list) else [raw]
         self.channel_ids = [c for c in (_cid(v) for v in raw) if c]
-        self.role_suffix = str(sec.get("role_suffix") if sec.get("role_suffix") is not None
-                               else DEFAULT_ROLE_SUFFIX).strip()
         try:
             self.max_length = max(1, min(200, int(sec.get("max_length") or DEFAULT_MAX_LENGTH)))
         except (TypeError, ValueError):
@@ -79,12 +78,6 @@ class Settings:
 
     def channel_allowed(self, channel_id) -> bool:
         return not self.channel_ids or _cid(channel_id) in self.channel_ids
-
-    def can_use(self, role_names) -> bool:
-        """역할 이름 중 하나라도 role_suffix 로 끝나면 사용 가능 (suffix 가 비면 아무도 못 씀)."""
-        if not self.role_suffix:
-            return False
-        return any(str(r).strip().endswith(self.role_suffix) for r in role_names or ())
 
     def clean(self, text) -> str:
         return " ".join(str(text or "").split())[:self.max_length]

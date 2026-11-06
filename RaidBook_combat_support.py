@@ -16,6 +16,8 @@ from collections import defaultdict
 from datetime import datetime
 
 import discord
+
+import RaidBook_perms as rb_perms
 from discord import ui
 
 import RaidBook_clans as rb_clans
@@ -500,7 +502,7 @@ class CombatModal(ui.Modal, title="⚔️ 전투지원 요청"):
             await interaction.followup.send(f"❌ 등록 실패: {e}", ephemeral=True)
 
 
-class CombatView(ui.View):
+class CombatView(rb_perms.GuardedView):
     """등록된 전투지원 알림 버튼 — custom_id 고정이라 재시작 후에도 동작."""
 
     def __init__(self, cs: CombatSupport, ended=False):

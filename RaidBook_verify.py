@@ -21,6 +21,8 @@ import os
 
 import discord
 
+import RaidBook_perms as rb_perms
+
 from RaidBook_common import write_json_atomic
 
 CHANNEL_KEY = "verify_channel_id"
@@ -35,7 +37,7 @@ SECTION_COMMENT = (
     "verify.password = 입장 비밀번호(비면 인증 안 됨), verify.role_id = 인증되면 줄 역할 ID"
     "(비면 role_name 역할을 찾거나 새로 만들어 저장), verify.max_failures = 이 횟수 틀리면 추방(0=제한 없음), "
     "verify.fail_action = kick(추방)/none(안내만), verify.log_channel_id = 기록 채널(비면 보탐-명령), "
-    "verify.keep_role_suffix = /인증권한 때 채널 권한을 남길 역할 이름 끝 글자(기본 운영진, 비우면 전부 지움). "
+    "verify.keep_role_name = /인증권한 때 채널 권한을 남길 역할 이름(기본 운영진, 비우면 전부 지움). "
     "봇에 '역할 관리'·'멤버 추방' 권한이 있어야 하고, 봇 역할이 '인증됨'보다 위에 있어야 해요. "
     "@everyone은 #인증만 보이게, 일반 채널은 '인증됨'만 보이게 서버 설정에서 바꿔 주세요. 고친 뒤 보스봇을 다시 시작하세요."
 )
@@ -58,7 +60,7 @@ def default_section() -> dict:
         "max_failures": DEFAULT_MAX_FAILURES,
         "fail_action": "kick",
         "log_channel_id": None,
-        "keep_role_suffix": "운영진",
+        "keep_role_name": "운영진",
     }
 
 
@@ -70,6 +72,11 @@ def ensure_section(config) -> bool:
         config["verify"] = default_section()
         changed = True
     else:
+        # 예전 keep_role_suffix('운영진'으로 끝나는 역할) → keep_role_name('운영진' 역할 하나) (2026-11-06)
+        if "keep_role_suffix" in sec:
+            sec.pop("keep_role_suffix")
+            sec["keep_role_name"] = "운영진"
+            changed = True
         for k, v in default_section().items():
             if k not in sec:
                 sec[k] = v
@@ -77,7 +84,7 @@ def ensure_section(config) -> bool:
     if CHANNEL_KEY not in config:
         config[CHANNEL_KEY] = None
         changed = True
-    if "_verify_comment" not in config:
+    if config.get("_verify_comment") != SECTION_COMMENT:
         config["_verify_comment"] = SECTION_COMMENT
         changed = True
     return changed
@@ -97,8 +104,8 @@ class Settings:
         self.kick = str(sec.get("fail_action") or "kick").strip().lower() == "kick"
         self.log_channel_id = _cid(sec.get("log_channel_id"))
         self.channel_id = _cid(config.get(CHANNEL_KEY))
-        self.keep_role_suffix = str(sec.get("keep_role_suffix") if sec.get("keep_role_suffix") is not None
-                                    else "운영진").strip()
+        self.keep_role_name = str(sec.get("keep_role_name") if sec.get("keep_role_name") is not None
+                                  else "운영진").strip()
 
     def check(self, typed) -> bool:
         """비밀번호 비교 (앞뒤 공백 무시, 대소문자 구분). 비밀번호가 비어 있으면 항상 False."""
@@ -418,7 +425,7 @@ class VerifyModal(discord.ui.Modal, title="서버 인증"):
         await self.verifier.submit(interaction, self.password.value)
 
 
-class VerifyView(discord.ui.View):
+class VerifyView(rb_perms.GuardedView):
     def __init__(self, verifier):
         super().__init__(timeout=None)
         self.verifier = verifier

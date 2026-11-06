@@ -25,6 +25,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import RaidBook_music as rbm
+import RaidBook_perms as rb_perms
 from RaidBook_storage import DailyFileHandler, write_json_atomic
 from config_helper import (
     ensure_config_from_template,
@@ -166,6 +167,9 @@ async def _tree_on_error(interaction, error):
 
 
 bot.tree.on_error = _tree_on_error
+# 🛡️ 음악 명령도 공용 권한 표(RaidBook_perms) 먼저 확인 — 보스봇 명령은 이 표에 없어 그대로 지나감
+rb_perms.configure_from_file(get_config_path("boss_config.json"), log)
+bot.tree.interaction_check = rb_perms.command_gate("music")
 
 
 # ── 서버별 재생 상태 ──────────────────────────────────────────────────────
@@ -653,7 +657,7 @@ async def do_volume_step(interaction: discord.Interaction, delta: int):
         await _refresh_np(p)
 
 
-class MusicControlView(discord.ui.View):
+class MusicControlView(rb_perms.GuardedView):
     """재생 메시지 버튼 — custom_id 고정 + timeout 없음 (봇 재시작 후에도 눌리면 현재 상태 기준으로 동작)."""
 
     def __init__(self):

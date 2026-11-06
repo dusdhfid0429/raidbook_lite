@@ -117,8 +117,6 @@ def test_group_by_uid_with_labels():
 
 
 def test_headcount():
-    assert rbc.is_staff_role("운영진") and rbc.is_staff_role("슈퍼맨운영진") and rbc.is_staff_role("썰자운영진 ")
-    assert not rbc.is_staff_role("정도") and not rbc.is_staff_role("운영진후보") and not rbc.is_staff_role(None)
     roles = {"1": {"정도"}, "2": {"정도"}, "3": {"슈퍼맨"}, "4": set()}
     names = {"1": "[정도]투신/기사/90", "2": "빼빼로", "3": "[슈퍼맨]빼쥬 법사 88", "4": "손님"}
     groups, unassigned = rbc.group_by_clan(list(roles), TWO, roles.get, label_of=names.get)
