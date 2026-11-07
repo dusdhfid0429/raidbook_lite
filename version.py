@@ -7,7 +7,7 @@ from datetime import datetime
 # 버전 정보
 VERSION_MAJOR = 1
 VERSION_MINOR = 0
-VERSION_PATCH = 51
+VERSION_PATCH = 52
 VERSION_BUILD = 1
 
 # 버전 문자열
@@ -16,7 +16,7 @@ VERSION_FULL = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}.{VERSION_BUILD}
 
 # 릴리즈 정보
 RELEASE_DATE = "2026-11-07"
-RELEASE_NAME = "Lite - 인원 수집 켜기/끄기 플래그 (기본 꺼짐), /수집 명령"
+RELEASE_NAME = "Lite - 경매 켜기/끄기 플래그 (/경매), 혈맹 표시·자정 이름 덮어쓰기 수정"
 RELEASE_CHANNEL = "stable"  # stable, beta, alpha
 
 # 제품 정보
