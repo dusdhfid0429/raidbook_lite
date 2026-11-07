@@ -308,8 +308,10 @@ ATTEND_BUTTON_IDS = ("boss_voicecheck",)
 # 👥 참석 인원 수집 플래그 (2026-11-07 동훈님) — 끄면 정각 자동 인원체크·마감 전 인원체크·/인원체크가 멈추고,
 # 보스알림·전투지원 알림의 수집 버튼(인원체크·➕ 인원 추가·➖ 인원 제거)과 본문의 참석 명단(✅ 참석·혈맹별 칸)을 숨긴다.
 # 켜면 모두 돌아온다. boss_config.json 의 attendance_collect_enabled 또는 /수집 켜기·끄기 (기본 꺼짐)
+# 보스알림의 획득 아이템(득템 기록) 버튼도 같은 플래그로 숨기고 보인다 (2026-11-08 동훈님)
 COLLECT_KEY = "attendance_collect_enabled"
-COLLECT_BUTTON_IDS = ("boss_voicecheck", "boss_attendee_add", "boss_attendee_remove")
+LOOT_BUTTON_ID = "boss_loot"
+COLLECT_BUTTON_IDS = ("boss_voicecheck", "boss_attendee_add", "boss_attendee_remove", LOOT_BUTTON_ID)
 COLLECT_OFF_TEXT = "👥 지금은 인원 수집이 꺼져 있어요. (서버마스터가 /수집 켜기로 켤 수 있어요)"
 
 
@@ -321,7 +323,7 @@ def collect_enabled() -> bool:
 if COLLECT_KEY not in config:
     config[COLLECT_KEY] = False
     config["_attendance_collect_enabled_comment"] = (
-        "true면 참석 인원 수집 켜기: 정각 자동 인원체크·/인원체크·알림의 인원체크/➕/➖ 버튼·참석 명단 표시. "
+        "true면 참석 인원 수집 켜기: 정각 자동 인원체크·/인원체크·알림의 인원체크/➕/➖·획득 아이템 버튼·참석 명단 표시. "
         "false면 모두 숨김 (/수집 켜기·끄기로도 바꿀 수 있어요)")
     try:
         write_json_atomic(CONFIG_PATH, config, log)
@@ -2159,6 +2161,8 @@ class AttendView(rb_perms.GuardedView):
                 child.disabled = self.expired
                 if not collect:
                     self.remove_item(child)   # 인원 수집 꺼짐 → 인원체크 숨김
+            elif not collect and getattr(child, "custom_id", None) == LOOT_BUTTON_ID:
+                self.remove_item(child)       # 인원 수집 꺼짐 → 획득 아이템 숨김
         for child in self._attendee_edit_items:
             shown = child in self.children
             want = self._persistent or (self.expired and collect)
@@ -2495,6 +2499,9 @@ class AttendView(rb_perms.GuardedView):
         # persistent view는 모든 메시지가 같은 인스턴스를 공유하므로,
         # 매 클릭마다 해당 메시지의 데이터로 명시적으로 재로드 (이전 메시지 캐시 차단)
         msg_id = interaction.message.id
+        if not collect_enabled():
+            await interaction.response.send_message(COLLECT_OFF_TEXT, ephemeral=True)
+            return
         if is_loot_processing(msg_id):
             await interaction.response.send_message(loot_busy_message(), ephemeral=True)
             return
@@ -3564,13 +3571,14 @@ def _alert_needs_auction_sync(ids, auction_on):
         return False
     has_auction = "boss_auction_create" in ids
     if auction_on:
-        return not has_auction and "boss_loot" in ids
+        # 인원 수집이 꺼져 있으면 득템 기록 버튼도 숨겨져 있어 수집 버튼 유무로는 못 가린다 → 경매생성 없으면 대상
+        return not has_auction and (LOOT_BUTTON_ID in ids or not collect_enabled())
     return has_auction
 
 
 async def _sync_collect_display(limit=300, auction=None):
     """인원 수집·경매 플래그에 맞춰 이미 올라간 보스알림·전투지원 알림을 다시 그린다.
-    수집 꺼짐: 인원체크·➕/➖ 버튼과 참석 명단 숨김 / 경매 꺼짐: 🔨 경매생성 숨김 / 켜짐: 다시 보이기.
+    수집 꺼짐: 인원체크·➕/➖·획득 아이템 버튼과 참석 명단 숨김 / 경매 꺼짐: 🔨 경매생성 숨김 / 켜짐: 다시 보이기.
     auction: None이면 경매 플래그가 마지막 반영과 달라졌을 때만 경매생성도 맞춘다 (평소 시작 때 화면 그대로).
     이미 맞는 알림은 건드리지 않는다. 반환: 고친 개수."""
     on = collect_enabled()
