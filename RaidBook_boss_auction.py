@@ -278,7 +278,7 @@ def build_embed(rec, currency="", now=None):
         hist = bid_history_text(rec)
         if hist and status == "active":
             embed.add_field(name=f"📜 최근 입찰 (총 {rec.get('bid_count', 0)}회)", value=hist, inline=False)
-    if rec.get("source_message_id") and status != "closed":
+    if rec.get("source_message_id") and rec.get("allowed_uids") is not None and status != "closed":
         embed.add_field(name="🔐 입찰 자격", value="해당 보스탐 참석자만 입찰할 수 있어요.", inline=False)
     embed.set_footer(text=f"입찰 {rec.get('bid_count', 0)}회 · 등록자 {rec.get('creator_name', '-')}")
     return embed
@@ -290,6 +290,7 @@ class BossAuction:
     def __init__(self, bot, *, channel_id, data_dir, is_admin, logger, currency="", get_attendees=None):
         self.bot = bot
         self.get_attendees = get_attendees   # (보스 알림 메시지ID) → 참석자 UID 목록
+        self.attendee_only = lambda: True    # False면 입찰 자격 제한 없음 (보스봇: 인원 수집 플래그)
         self.channel_id = int(channel_id or 0)
         self.store = AuctionStore(os.path.join(data_dir, "boss_auction_state.json"), logger)
         self.is_admin = is_admin
@@ -465,8 +466,8 @@ class BossAuction:
 
     async def load_allowed(self, source_message_id):
         """원본 보스 알림의 참석자 UID 스냅샷 (Excel 조회는 스레드에서 — 입찰 반응 지연 방지)."""
-        if not source_message_id or self.get_attendees is None:
-            return None
+        if not source_message_id or self.get_attendees is None or not self.attendee_only():
+            return None   # 참석 인원 수집이 꺼져 있으면 참석 명단이 없으니 누구나 입찰
         try:
             uids = await asyncio.to_thread(self.get_attendees, source_message_id)
         except Exception as e:
@@ -1263,7 +1264,7 @@ def board_usage_text(board, state, lot=None):
         return ("· ▶️ **경매시작** (관리자) — 다음 아이템의 입찰을 열어요\n"
                 "· ⏹️ **종료** (관리자) — 남은 아이템을 모두 취소하고 끝내요")
     if state == "active":
-        who = "해당 보스탐 참석자만" if board.get("source_message_id") else "누구나"
+        who = "해당 보스탐 참석자만" if board.get("source_message_id") and board.get("allowed_uids") is not None else "누구나"
         lines = [f"· 🙋 **입찰** — 누를 때마다 호가만큼 올라가요 ({who})",
                  f"· 입찰 직후 {BID_SETTLE_SEC}초는 확인 시간이라 다른 사람은 잠시 못 눌러요"]
         if lot and lot.get("manual"):
@@ -1613,7 +1614,7 @@ def build_board_embed(board, currency="", now=None):
         hist = bid_history_text(lot)
         if hist:
             embed.add_field(name=f"📜 최근 입찰 (총 {lot.get('bid_count', 0)}회)", value=hist, inline=False)
-        if board.get("source_message_id"):
+        if board.get("source_message_id") and board.get("allowed_uids") is not None:
             embed.add_field(name="🔐 입찰 자격", value="해당 보스탐 참석자만 입찰할 수 있어요.", inline=False)
     usage = board_usage_text(board, state, lot)
     if usage:

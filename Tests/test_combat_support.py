@@ -215,6 +215,21 @@ def test_view_buttons_and_end_permission():
     asyncio.run(run())
 
 
+def test_collect_off_hides_buttons_and_attendees():
+    """인원 수집 플래그 꺼짐 → 인원체크·➕/➖ 숨김(전투종료만), 본문 참석 명단 없음. 재시작 복구 뷰는 모두 유지."""
+    async def run():
+        obj = cs.CombatSupport(None, {}, CLANS, tempfile.gettempdir(), is_admin=lambda m: True,
+                               clan_split_ids=lambda ids: None, id_to_name=dict,
+                               update_user_mapping=lambda u, n: None, collect_enabled=lambda: False)
+        assert [c.custom_id for c in cs.CombatView(obj).children] == [cs.BTN_END]
+        assert len(cs.CombatView(obj, persistent=True).children) == 4
+        rec = {"content": "축순 3번", "requester_name": "투신", "time": "14:05", "attendees": ["1"]}
+        e = obj._embed(rec)
+        assert "참석" not in e.description and not e.fields
+        assert "✅ 현재 참석" in cs.build_embed(rec, {}, None).description   # 켜짐(기본)은 그대로
+    asyncio.run(run())
+
+
 def test_store_update():
     with tempfile.TemporaryDirectory() as d:
         st = cs.Store(os.path.join(d, "c.json"))

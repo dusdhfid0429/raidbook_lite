@@ -318,11 +318,13 @@ def test_usage_guides():
         return next((f.value for f in e.fields if f.name == "📖 사용법"), "")
     assert "아이템 고르기" in usage(ba.build_pending_embed([]))           # 대기 목록 사용법
     lots, _ = ba.parse_board_lots("집행검", D)
-    board = {"lots": lots, "status": "active", "current": None, "source_message_id": "1"}
+    board = {"lots": lots, "status": "active", "current": None, "source_message_id": "1", "allowed_uids": ["7"]}
     assert "경매시작" in usage(ba.build_board_embed(board, now=1990))       # 시작 대기
     ba.board_start_next(board, 2000, manual=True)
     u = usage(ba.build_board_embed(board, now=2001))
     assert "입찰" in u and "경매 마감" in u and "참석자만" in u             # 진행 중 (진행자 마감)
+    open_board = dict(board, allowed_uids=None)                          # 인원 수집 꺼짐 → 참석 명단 없음
+    assert "누구나" in usage(ba.build_board_embed(open_board, now=2001))
     lot = ba.board_close_current(board)
     ba.board_after_close(board)
     assert "유찰 재경매" in usage(ba.build_board_embed(board, now=2010)) and lot   # 끝남 (유찰)

@@ -35,6 +35,8 @@ BTN_VOICECHECK = "combat_voicecheck"
 BTN_ADD = "combat_attendee_add"
 BTN_REMOVE = "combat_attendee_remove"
 BTN_END = "combat_end"
+COLLECT_BUTTONS = (BTN_VOICECHECK, BTN_ADD, BTN_REMOVE)   # 인원 수집 플래그가 꺼지면 숨기는 버튼
+COLLECT_OFF_TEXT = "👥 지금은 인원 수집이 꺼져 있어요. (서버마스터가 /수집 켜기로 켤 수 있어요)"
 
 
 # ── 설정 (순수 로직) ─────────────────────────────────────────────────────
@@ -237,7 +239,7 @@ def merge_attendees(current, add=(), remove=()) -> list:
 
 
 # ── 화면 ────────────────────────────────────────────────────────────────
-def build_embed(rec, names, clan_split=None):
+def build_embed(rec, names, clan_split=None, show_attendees=True):
     """rec: 저장 기록, names: {uid: 이름}, clan_split: 참석자 UID → (groups, unassigned) 또는 None.
     B안 (동훈님 선택 2026-11-05): 제목 고정, 내용은 📌 줄. 전투종료 후엔 회색 + 🔒 종료 시각 + 최종 참석."""
     ended = bool(rec.get("ended_at"))
@@ -254,6 +256,9 @@ def build_embed(rec, names, clan_split=None):
     lines = [f"📌 {rec.get('content', '')}", line]
     if ended:
         lines.append(f"🔒 전투종료 {rec.get('ended_time', '')}".rstrip())
+    if not show_attendees:   # 인원 수집 꺼짐 → 참석 명단·인원수 숨김
+        embed.description = "\n".join(lines)[:4000]
+        return embed
     prefix = "✅ 최종 참석" if ended else "✅ 현재 참석"
     attendees = [str(u) for u in rec.get("attendees") or []]
     split = None
@@ -284,7 +289,7 @@ class CombatSupport:
     """보스봇이 만들어 붙인다. helpers는 보스봇 함수 (관리자 판정·혈맹 분류·이름표)."""
 
     def __init__(self, bot, config, clan_roles, data_dir, *, is_admin, clan_split_ids, id_to_name,
-                 update_user_mapping, tts_port=0, music_port=0, logger=None):
+                 update_user_mapping, tts_port=0, music_port=0, logger=None, collect_enabled=None):
         self.bot = bot
         self.config = config
         self.settings = Settings(config, clan_roles)
@@ -297,6 +302,7 @@ class CombatSupport:
         self.music_port = music_port
         self.log = logger
         self._locks = defaultdict(asyncio.Lock)
+        self.collect_enabled = collect_enabled or (lambda: True)   # 인원 수집 플래그 (보스봇 attendance_collect_enabled)
 
     def _info(self, text):
         if self.log:
@@ -393,7 +399,35 @@ class CombatSupport:
 
     # 화면 갱신 -----------------------------------------------------------
     def _embed(self, rec):
-        return build_embed(rec, self.id_to_name(), self.clan_split_ids)
+        return build_embed(rec, self.id_to_name(), self.clan_split_ids, show_attendees=self.collect_enabled())
+
+    async def sync_collect_display(self, limit=300) -> int:
+        """인원 수집 플래그에 맞춰 이미 올라간 전투지원 알림의 수집 버튼·참석 명단을 숨기거나 다시 보인다. 반환: 고친 개수."""
+        cid = self.settings.alert_channel_id
+        if not cid:
+            return 0
+        ch = self.bot.get_channel(cid)
+        if ch is None:
+            try:
+                ch = await self.bot.fetch_channel(cid)
+            except Exception:
+                return 0
+        on = bool(self.collect_enabled())
+        fixed = 0
+        async for msg in ch.history(limit=limit):
+            if msg.author.id != self.bot.user.id:
+                continue
+            ids = {getattr(c, "custom_id", None) for row in msg.components for c in getattr(row, "children", [])}
+            if BTN_END not in ids or bool(ids & set(COLLECT_BUTTONS)) == on:
+                continue
+            rec = self.store.get(msg.id)
+            if rec is None:
+                continue
+            async with self._locks[msg.id]:
+                await self.redraw(msg, rec)
+            fixed += 1
+            await asyncio.sleep(1)   # 디스코드 속도 제한 여유
+        return fixed
 
     async def redraw(self, message, rec):
         try:
@@ -421,6 +455,8 @@ class CombatSupport:
             rec = self.store.get(message.id)
             if rec is None:
                 return "⚠️ 이 알림의 기록을 찾을 수 없어요."
+            if not self.collect_enabled():
+                return COLLECT_OFF_TEXT
             if rec.get("ended_at"):
                 return "🔒 이미 전투종료된 알림이에요. 빠진 사람은 ➕ 인원 추가로 넣어 주세요."
             channels = self._voice_channels(message.guild, rec)
@@ -448,10 +484,11 @@ class CombatSupport:
             return "⚠️ 이 알림의 기록을 찾을 수 없어요."
         if rec.get("ended_at"):
             return "🔒 이미 전투종료된 알림이에요."
-        try:
-            await self.voice_check(message)   # 종료 직전 전투방 인원 담기 (채널 미설정이면 건너뜀)
-        except Exception as e:
-            self._info(f"[전투종료 전 인원체크 실패] {message.id}: {type(e).__name__}: {e}")
+        if self.collect_enabled():
+            try:
+                await self.voice_check(message)   # 종료 직전 전투방 인원 담기 (채널 미설정이면 건너뜀)
+            except Exception as e:
+                self._info(f"[전투종료 전 인원체크 실패] {message.id}: {type(e).__name__}: {e}")
         async with self._locks[message.id]:
             now = datetime.now()
 
@@ -505,18 +542,26 @@ class CombatModal(ui.Modal, title="⚔️ 전투지원 요청"):
 class CombatView(rb_perms.GuardedView):
     """등록된 전투지원 알림 버튼 — custom_id 고정이라 재시작 후에도 동작."""
 
-    def __init__(self, cs: CombatSupport, ended=False):
+    def __init__(self, cs: CombatSupport, ended=False, persistent=False):
         super().__init__(timeout=None)
         self.cs = cs
         for child in self.children:
             if getattr(child, "custom_id", None) in (BTN_VOICECHECK, BTN_END):
                 child.disabled = bool(ended)
+        # 인원 수집 꺼짐 → 인원체크·➕/➖ 숨김 (재시작 복구용 뷰는 모두 유지 — 예전 메시지 버튼도 응답하도록)
+        if not persistent and not cs.collect_enabled():
+            for child in list(self.children):
+                if getattr(child, "custom_id", None) in COLLECT_BUTTONS:
+                    self.remove_item(child)
 
     async def _admin_only(self, interaction, what):
-        if self.cs.is_admin(interaction.user):
-            return True
-        await interaction.followup.send(f"⛔ {what}는 운영진만 할 수 있어요.", ephemeral=True)
-        return False
+        if not self.cs.is_admin(interaction.user):
+            await interaction.followup.send(f"⛔ {what}는 운영진만 할 수 있어요.", ephemeral=True)
+            return False
+        if not self.cs.collect_enabled():   # 인원체크·➕/➖ 모두 여기를 거친다
+            await interaction.followup.send(COLLECT_OFF_TEXT, ephemeral=True)
+            return False
+        return True
 
     @ui.button(label="인원체크", style=discord.ButtonStyle.success, custom_id=BTN_VOICECHECK)
     async def voice_check_button(self, interaction: discord.Interaction, button: ui.Button):

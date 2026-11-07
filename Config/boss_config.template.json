@@ -27,6 +27,8 @@
   "voice_channel_ids": [],
   "_voice_channel_ids_comment": "정각 자동 인원체크 대상 음성채널 ID 목록. 비우면 서버의 모든 음성채널(AFK 제외). /인원체크는 명령을 입력한 음성채널 기준.",
   "voice_check_at_spawn": true,
+  "attendance_collect_enabled": false,
+  "_attendance_collect_enabled_comment": "true면 참석 인원 수집 켜기: 정각 자동 인원체크·/인원체크·알림의 인원체크/➕/➖ 버튼·참석 명단 표시. false면 모두 숨김 (/수집 켜기·끄기로도 바꿀 수 있어요)",
   "loot_auction_button": true,
   "_loot_auction_button_comment": "true면 보스 알림의 버튼이 '💎 득템·경매'가 됨 — 경매할/기록만 할 아이템을 한 번에 입력하면 득템 기록 + 경매 진행판 게시 (아이템마다 관리자가 ▶️ 경매시작)",
   "loot_auction_legacy": false,
