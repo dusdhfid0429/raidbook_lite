@@ -5354,7 +5354,9 @@ async def daily_refresh():
         if not _has_boss_data():
             continue
 
-        guild_updated = await update_mapping_from_guild(bot.guilds[0] if bot.guilds else None)
+        # 봇이 테스트 서버에도 들어가 있으면 bot.guilds[0]이 테스트 서버일 수 있다 →
+        # 그 서버 이름(별명 없는 계정명)으로 user_mapping을 덮어써 화면 이름이 바뀌었다. 알림 채널 서버만 본다
+        guild_updated = await update_mapping_from_guild(_clan_guild())
         message_map = await build_message_map_from_channel()
         async with excel_lock:
             try:

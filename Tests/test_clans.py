@@ -138,6 +138,15 @@ def test_split_message():
     assert joined.split(" · ") == [f"이름{i:03d}" for i in range(400)]
     assert rbc.split_message("짧음") == ["짧음"]
 
+
+def test_clan_staff_role_counts_as_clan():
+    """'정도운영진' 역할만 있는 운영진도 정도 칸에 (미지정 아님), 둘 다 있어도 한 번만."""
+    clans = rbc.parse_clan_roles(None)
+    roles = {"령": {"정도운영진", "운영진"}, "단장": {"정도", "정도운영진"}, "손님": {"운영진"}}
+    groups, unassigned = rbc.group_by_clan(list(roles), clans, roles.get)
+    assert groups[0][2] == ["령", "단장"]
+    assert unassigned == ["손님"]
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):
