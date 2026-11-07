@@ -7,7 +7,7 @@ from datetime import datetime
 # 버전 정보
 VERSION_MAJOR = 1
 VERSION_MINOR = 0
-VERSION_PATCH = 52
+VERSION_PATCH = 53
 VERSION_BUILD = 1
 
 # 버전 문자열
