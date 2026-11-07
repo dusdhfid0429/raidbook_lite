@@ -328,6 +328,28 @@ if COLLECT_KEY not in config:
         log.info("[설정] boss_config.json에 인원 수집 플래그(attendance_collect_enabled=false)를 추가했어요")
     except Exception as e:
         log.info(f"[설정] 인원 수집 플래그 저장 실패 (이번 실행만 적용): {e}")
+# 🔨 경매 플래그 (2026-11-07 동훈님) — 끄면 보스알림의 🔨 경매생성 버튼과 경매장의 📌 경매 대기 목록 메시지를 숨긴다.
+# 켜면 지금과 똑같이 동작. boss_config.json 의 auction_enabled 또는 /경매 켜기·끄기 (기본 켜짐)
+AUCTION_KEY = "auction_enabled"
+AUCTION_OFF_TEXT = "🔨 지금은 경매가 꺼져 있어요. (서버마스터가 /경매 켜기로 켤 수 있어요)"
+AUCTION_FLAG_PATH = os.path.join(DATA_DIR, "auction_flag.json")   # 마지막으로 화면에 반영한 경매 플래그
+
+
+def auction_enabled() -> bool:
+    """경매가 켜져 있는지 — 매번 설정을 읽어 /경매 로 바꾸면 바로 반영된다."""
+    return bool(config.get(AUCTION_KEY, True))
+
+
+if AUCTION_KEY not in config:
+    config[AUCTION_KEY] = True
+    config["_auction_enabled_comment"] = (
+        "true면 경매 켜기(지금과 동일). false면 보스알림의 🔨 경매생성 버튼과 경매장의 📌 경매 대기 목록을 숨김 "
+        "(/경매 켜기·끄기로도 바꿀 수 있어요)")
+    try:
+        write_json_atomic(CONFIG_PATH, config, log)
+        log.info("[설정] boss_config.json에 경매 플래그(auction_enabled=true)를 추가했어요")
+    except Exception as e:
+        log.info(f"[설정] 경매 플래그 저장 실패 (이번 실행만 적용): {e}")
 # 득템 채널 공지 — 💎 득템·경매(진행판)를 쓰면 기록·결과가 알림 메시지에 남으므로 기본 꺼짐
 LOOT_ANNOUNCE = bool(config.get("loot_announce", not config.get("loot_auction_button", False)))
 # 보스 알림의 💎 득템·경매 — 아이템 입력 한 번으로 득템 기록 + 경매 진행판 자동 진행 (RaidBook_boss_auction)
@@ -1779,6 +1801,11 @@ _pending_task = None
 _pending_cache = {}   # 보스알림ID → entry (팝업을 즉시 띄우기 위한 마지막 목록)
 
 
+def _pending_list_on():
+    """📌 경매 대기 목록을 쓸지 — 설정(auction_pending_list) + 경매 플래그."""
+    return PENDING_LIST_ENABLED and auction_enabled()
+
+
 def _load_pending_state():
     try:
         with open(PENDING_STATE_PATH, "r", encoding="utf-8") as f:
@@ -1840,6 +1867,9 @@ class PendingListView(rb_perms.GuardedView):
     @ui.select(custom_id="boss_pending_pick", placeholder="🔨 경매할 아이템 고르기 (관리자)",
                options=[discord.SelectOption(label="-", value="none")], row=0)
     async def pick_select(self, interaction: discord.Interaction, select: ui.Select):
+        if not auction_enabled():
+            await interaction.response.send_message(AUCTION_OFF_TEXT, ephemeral=True)
+            return
         if not _is_bot_admin(interaction.user):
             await interaction.response.send_message("⛔ 목록에서 경매 생성은 관리자만 할 수 있어요. "
                                                     "보스 알림의 🔨 경매생성 버튼을 써 주세요.", ephemeral=True)
@@ -1863,12 +1893,18 @@ class PendingListView(rb_perms.GuardedView):
 
     @ui.button(label="새로고침", emoji="🔄", style=discord.ButtonStyle.secondary, custom_id="boss_pending_refresh", row=1)
     async def refresh_btn(self, interaction: discord.Interaction, button: ui.Button):
+        if not auction_enabled():
+            await interaction.response.send_message(AUCTION_OFF_TEXT, ephemeral=True)
+            return
         await interaction.response.defer(ephemeral=True)
         await refresh_pending_list()
         await interaction.followup.send("🔄 목록을 새로 고쳤어요.", ephemeral=True)
 
     @ui.button(label="목록에서 빼기", emoji="🙈", style=discord.ButtonStyle.secondary, custom_id="boss_pending_hide", row=1)
     async def hide_btn(self, interaction: discord.Interaction, button: ui.Button):
+        if not auction_enabled():
+            await interaction.response.send_message(AUCTION_OFF_TEXT, ephemeral=True)
+            return
         if not _is_bot_admin(interaction.user):
             await interaction.response.send_message("⛔ 관리자만 목록을 정리할 수 있어요.", ephemeral=True)
             return
@@ -1908,9 +1944,11 @@ class _PendingHideView(discord.ui.View):
 async def refresh_pending_list():
     """목록을 다시 계산해 경매장 맨 아래 메시지를 갱신 (밀려 올라갔으면 지우고 다시 게시)."""
     global _pending_cache
-    if not PENDING_LIST_ENABLED or not AUCTION_CHANNEL_ID:
+    if not _pending_list_on() or not AUCTION_CHANNEL_ID:
         return
     async with _pending_lock:
+        if not auction_enabled():
+            return   # 대기 중에 /경매 끄기
         try:
             entries = await asyncio.to_thread(_collect_pending_entries)
         except Exception as e:
@@ -1973,7 +2011,7 @@ async def refresh_pending_list():
 def schedule_pending_refresh(delay=3.0):
     """연속 변경을 묶어 몇 초 뒤 한 번만 갱신."""
     global _pending_task
-    if not PENDING_LIST_ENABLED:
+    if not _pending_list_on():
         return
     if _pending_task and not _pending_task.done():
         _pending_task.cancel()
@@ -1993,6 +2031,30 @@ async def _pending_refresh_loop():
     while True:
         await asyncio.sleep(600)
         await refresh_pending_list()
+
+
+async def remove_pending_list():
+    """경매 꺼짐 → 경매장의 📌 경매 대기 목록 메시지를 지운다 (켜면 refresh_pending_list가 다시 올림). 반환: 지웠는지."""
+    if _pending_task and not _pending_task.done():
+        _pending_task.cancel()
+    async with _pending_lock:
+        st = _load_pending_state()
+        old_id = st.get("message_id")
+        if not old_id:
+            return False
+        try:
+            ch_id = int(st.get("channel_id") or AUCTION_CHANNEL_ID)
+            ch = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
+            await (await ch.fetch_message(int(old_id))).delete()   # 봇이 올린 목록 메시지만 지움
+        except discord.NotFound:
+            pass
+        except Exception as e:
+            log.info(f"[경매 대기 목록 숨김 실패] {type(e).__name__}: {e}")
+            return False
+        st.pop("message_id", None)
+        _save_pending_state(st)
+        log.info("[경매 대기 목록] 경매 꺼짐 — 목록 메시지를 지웠어요")
+        return True
 
 
 async def _apply_board_results(board):
@@ -2073,7 +2135,8 @@ class AttendView(rb_perms.GuardedView):
             for child in self.children:
                 if getattr(child, "custom_id", None) == "boss_loot":
                     child.emoji = "📦"
-        else:
+        if not LOOT_AUCTION_BUTTON or not (auction_enabled() or persistent):
+            # 경매 꺼짐 → 🔨 경매생성 숨김 (재시작 복구용 뷰는 모두 유지)
             for child in list(self.children):
                 if getattr(child, "custom_id", None) == "boss_auction_create":
                     self.remove_item(child)
@@ -2504,6 +2567,9 @@ class AttendView(rb_perms.GuardedView):
     @ui.button(label="경매생성", emoji="🔨", style=discord.ButtonStyle.primary, custom_id="boss_auction_create")
     async def auction_create_button(self, interaction: discord.Interaction, button: ui.Button):
         """🔨 경매생성 — 기록된 득템 중 하나를 골라 시작가·호가·카운트를 넣어 경매장에 경매 메시지."""
+        if not auction_enabled():
+            await interaction.response.send_message(AUCTION_OFF_TEXT, ephemeral=True)
+            return
         msg_id = interaction.message.id
         self.message_id = msg_id
         self.channel_id = interaction.channel_id
@@ -3482,16 +3548,46 @@ def _closed_time_from_embed(msg):
         return None
 
 
-async def _sync_collect_display(limit=300):
-    """인원 수집 플래그에 맞춰 이미 올라간 보스알림·전투지원 알림을 다시 그린다.
-    꺼짐: 인원체크·➕/➖ 버튼과 참석 명단 숨김 / 켜짐: 다시 보이기. 이미 맞는 알림은 건드리지 않는다. 반환: 고친 개수."""
+def _auction_display_applied():
+    """마지막으로 알림 화면에 반영한 경매 플래그 (기록 없으면 켜짐 = 예전과 같은 화면)."""
+    try:
+        with open(AUCTION_FLAG_PATH, "r", encoding="utf-8") as f:
+            return bool(json.load(f).get("applied", True))
+    except Exception:
+        return True
+
+
+def _alert_needs_auction_sync(ids, auction_on):
+    """🔨 경매생성 버튼이 경매 플래그와 안 맞는지. 켜짐일 땐 경매생성이 아예 없던 옛 알림까지 건드리지 않게
+    득템 기록 버튼은 있는데 경매생성만 빠진 알림(=꺼짐 때 숨긴 것)만 대상."""
+    if not LOOT_AUCTION_BUTTON:
+        return False
+    has_auction = "boss_auction_create" in ids
+    if auction_on:
+        return not has_auction and "boss_loot" in ids
+    return has_auction
+
+
+async def _sync_collect_display(limit=300, auction=None):
+    """인원 수집·경매 플래그에 맞춰 이미 올라간 보스알림·전투지원 알림을 다시 그린다.
+    수집 꺼짐: 인원체크·➕/➖ 버튼과 참석 명단 숨김 / 경매 꺼짐: 🔨 경매생성 숨김 / 켜짐: 다시 보이기.
+    auction: None이면 경매 플래그가 마지막 반영과 달라졌을 때만 경매생성도 맞춘다 (평소 시작 때 화면 그대로).
+    이미 맞는 알림은 건드리지 않는다. 반환: 고친 개수."""
     on = collect_enabled()
+    auction_on = auction_enabled()
+    if auction is None:
+        auction = auction_on != _auction_display_applied()
     fixed = 0
     try:
         ch = bot.get_channel(ALERT_CHANNEL_ID) or await bot.fetch_channel(ALERT_CHANNEL_ID)
     except Exception as e:
         log.info(f"[수집 표시] 알림 채널 조회 실패: {type(e).__name__}: {e}")
         ch = None
+    if auction and ch is not None:
+        try:
+            write_json_atomic(AUCTION_FLAG_PATH, {"applied": auction_on}, log)
+        except Exception as e:
+            log.info(f"[경매 표시] 반영 기록 저장 실패: {type(e).__name__}: {e}")
     if ch is not None:
         active = load_active_messages()
         try:
@@ -3500,7 +3596,7 @@ async def _sync_collect_display(limit=300):
                     continue
                 ids = {getattr(c, "custom_id", None) for row in msg.components for c in getattr(row, "children", [])}
                 has_collect = bool(ids & set(COLLECT_BUTTON_IDS))
-                if not ids or has_collect == on:
+                if not ids or (has_collect == on and not (auction and _alert_needs_auction_sync(ids, auction_on))):
                     continue
                 key = str(msg.id)
                 async with _alert_lock(key):
@@ -3545,6 +3641,8 @@ async def _startup_alert_repairs():
     await _repair_closed_alert_buttons()
     await _convert_legacy_alert_format()
     await _sync_collect_display()
+    if not auction_enabled():
+        await remove_pending_list()
 
 
 async def _close_sweep_loop():
@@ -3834,6 +3932,38 @@ async def cmd_collect_toggle(interaction: discord.Interaction, 동작: str = "st
     fixed = await _sync_collect_display()
     await interaction.followup.send(
         f"👥 인원 수집을 **{'켰어요' if want else '껐어요'}** — 알림 {fixed}개를 다시 그렸어요.", ephemeral=True)
+
+
+@bot.tree.command(name="경매", description="서버마스터 전용 — 경매(알림의 🔨 경매생성 버튼·경매장 📌 경매 대기 목록)를 켜거나 꺼요")
+@discord.app_commands.describe(동작="켜기 / 끄기 / 상태")
+@discord.app_commands.choices(동작=[discord.app_commands.Choice(name="켜기", value="on"),
+                                  discord.app_commands.Choice(name="끄기", value="off"),
+                                  discord.app_commands.Choice(name="상태", value="status")])
+async def cmd_auction_toggle(interaction: discord.Interaction, 동작: str = "status"):
+    user = interaction.user
+    log.info(f"[명령어] /경매 {동작} | 사용자: {getattr(user, 'display_name', user)}")
+    if 동작 == "status":
+        await interaction.response.send_message(
+            f"🔨 경매: **{'켜짐' if auction_enabled() else '꺼짐'}**", ephemeral=True)
+        return
+    want = 동작 == "on"
+    if want == auction_enabled():
+        await interaction.response.send_message(
+            f"🔨 경매는 이미 **{'켜짐' if want else '꺼짐'}** 이에요.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    config[AUCTION_KEY] = want
+    _save_boss_config()
+    if want:
+        global _pending_loop_task
+        if PENDING_LIST_ENABLED and (_pending_loop_task is None or _pending_loop_task.done()):
+            _pending_loop_task = asyncio.ensure_future(_pending_refresh_loop())
+        await refresh_pending_list()
+    else:
+        await remove_pending_list()
+    fixed = await _sync_collect_display(auction=True)
+    await interaction.followup.send(
+        f"🔨 경매를 **{'켰어요' if want else '껐어요'}** — 알림 {fixed}개를 다시 그렸어요.", ephemeral=True)
 
 
 @bot.tree.command(name="전파", description="운영진 전용 — 적은 내용을 혈맹 대화방 전체에 음성으로 전달해요")
@@ -5413,7 +5543,7 @@ async def initialize_on_ready():
         _close_sweep_task = asyncio.ensure_future(_close_sweep_loop())
         asyncio.ensure_future(_startup_alert_repairs())
     global _pending_loop_task
-    if PENDING_LIST_ENABLED and (_pending_loop_task is None or _pending_loop_task.done()):
+    if _pending_list_on() and (_pending_loop_task is None or _pending_loop_task.done()):
         _pending_loop_task = asyncio.ensure_future(_pending_refresh_loop())
         schedule_pending_refresh(10.0)
     await _sync_slash_commands()
