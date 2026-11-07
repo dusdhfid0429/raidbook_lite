@@ -2035,7 +2035,6 @@ async def _pending_refresh_loop():
 
 async def remove_pending_list():
     """경매 꺼짐 → 경매장의 📌 경매 대기 목록 메시지를 지운다 (켜면 refresh_pending_list가 다시 올림). 반환: 지웠는지."""
-    global _pending_task
     if _pending_task and not _pending_task.done():
         _pending_task.cancel()
     async with _pending_lock:
