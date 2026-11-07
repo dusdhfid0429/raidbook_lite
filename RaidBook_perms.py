@@ -47,7 +47,7 @@ COMMANDS = {
         "refresh": OWNER, "save": OWNER, "restart": OWNER, "test": OWNER, "delete": OWNER,
         "recover": OWNER, "sync": OWNER, "fixid": OWNER, "fixnames": OWNER, "fixmsg": OWNER,
         "rename": OWNER, "attachloot": OWNER, "collectmembers": OWNER,
-        "인증권한": OWNER,
+        "인증권한": OWNER, "수집": OWNER,
     },
     "music": {
         "재생": NONE, "건너뛰기": NONE, "일시정지": NONE, "정지": NONE,

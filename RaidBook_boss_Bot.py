@@ -305,6 +305,29 @@ VOICE_CHECK_AT_SPAWN = bool(config.get("voice_check_at_spawn", True))
 # 참석은 보탐 음성방 인원 수집(정각 자동 인원체크·인원체크 버튼·/인원체크)으로만 기록 — 참석/취소 버튼은 없앴다 (2026-11-06)
 # 마감 시 비활성화되는 참석 계열 버튼
 ATTEND_BUTTON_IDS = ("boss_voicecheck",)
+# 👥 참석 인원 수집 플래그 (2026-11-07 동훈님) — 끄면 정각 자동 인원체크·마감 전 인원체크·/인원체크가 멈추고,
+# 보스알림·전투지원 알림의 수집 버튼(인원체크·➕ 인원 추가·➖ 인원 제거)과 본문의 참석 명단(✅ 참석·혈맹별 칸)을 숨긴다.
+# 켜면 모두 돌아온다. boss_config.json 의 attendance_collect_enabled 또는 /수집 켜기·끄기 (기본 꺼짐)
+COLLECT_KEY = "attendance_collect_enabled"
+COLLECT_BUTTON_IDS = ("boss_voicecheck", "boss_attendee_add", "boss_attendee_remove")
+COLLECT_OFF_TEXT = "👥 지금은 인원 수집이 꺼져 있어요. (서버마스터가 /수집 켜기로 켤 수 있어요)"
+
+
+def collect_enabled() -> bool:
+    """참석 인원 수집이 켜져 있는지 — 매번 설정을 읽어 /수집 으로 바꾸면 바로 반영된다."""
+    return bool(config.get(COLLECT_KEY, False))
+
+
+if COLLECT_KEY not in config:
+    config[COLLECT_KEY] = False
+    config["_attendance_collect_enabled_comment"] = (
+        "true면 참석 인원 수집 켜기: 정각 자동 인원체크·/인원체크·알림의 인원체크/➕/➖ 버튼·참석 명단 표시. "
+        "false면 모두 숨김 (/수집 켜기·끄기로도 바꿀 수 있어요)")
+    try:
+        write_json_atomic(CONFIG_PATH, config, log)
+        log.info("[설정] boss_config.json에 인원 수집 플래그(attendance_collect_enabled=false)를 추가했어요")
+    except Exception as e:
+        log.info(f"[설정] 인원 수집 플래그 저장 실패 (이번 실행만 적용): {e}")
 # 득템 채널 공지 — 💎 득템·경매(진행판)를 쓰면 기록·결과가 알림 메시지에 남으므로 기본 꺼짐
 LOOT_ANNOUNCE = bool(config.get("loot_announce", not config.get("loot_auction_button", False)))
 # 보스 알림의 💎 득템·경매 — 아이템 입력 한 번으로 득템 기록 + 경매 진행판 자동 진행 (RaidBook_boss_auction)
@@ -2059,6 +2082,7 @@ class AttendView(rb_perms.GuardedView):
             if getattr(child, "custom_id", None) == "boss_party":
                 child.disabled = True
         # 버튼 상태는 마감 여부 하나로 정한다 (마감 시각이 이미 지났으면 마감 상태로 시작)
+        # 인원 수집이 꺼져 있으면 인원체크·➕/➖ 는 apply_phase 에서 숨긴다 (재시작 복구용 뷰는 모두 유지)
         if not persistent:
             self.apply_phase(expired or _close_time_passed(self.disable_time))
 
@@ -2066,14 +2090,18 @@ class AttendView(rb_perms.GuardedView):
         """마감 전: 인원체크 켜짐, ➕/➖ 숨김 / 마감 후: 인원체크 꺼짐, ➕/➖ 노출.
         모든 버튼은 이 한 곳에서만 마감 여부에 맞춰 바뀐다."""
         self.expired = bool(closed)
-        for child in self.children:
+        collect = collect_enabled() or self._persistent
+        for child in list(self.children):
             if getattr(child, "custom_id", None) in ATTEND_BUTTON_IDS:
                 child.disabled = self.expired
+                if not collect:
+                    self.remove_item(child)   # 인원 수집 꺼짐 → 인원체크 숨김
         for child in self._attendee_edit_items:
             shown = child in self.children
-            if self.expired and not shown:
+            want = self._persistent or (self.expired and collect)
+            if want and not shown:
                 self.add_item(child)
-            elif not self.expired and shown and not self._persistent:
+            elif not want and shown:
                 self.remove_item(child)
 
     def _verify_attendees_from_log(self):
@@ -2092,7 +2120,7 @@ class AttendView(rb_perms.GuardedView):
 
     async def _disable_buttons_locked(self, message):
         mid = self.message_id or getattr(message, "id", None)
-        if mid and _spawn_check_pending(mid):
+        if mid and collect_enabled() and _spawn_check_pending(mid):
             # 정각 인원체크가 아직이면 마감 직전에 먼저 해서 음성방 인원을 담고 마감한다
             try:
                 await _voice_check_locked(mid)
@@ -2284,6 +2312,12 @@ class AttendView(rb_perms.GuardedView):
             except Exception:
                 pass
             return
+        if not collect_enabled():
+            try:
+                await interaction.followup.send(COLLECT_OFF_TEXT, ephemeral=True)
+            except Exception:
+                pass
+            return
         try:
             result = await voice_check_message(interaction.message.id)
         except Exception as e:
@@ -2307,6 +2341,9 @@ class AttendView(rb_perms.GuardedView):
         await interaction.response.defer(ephemeral=True)
         if not _is_bot_admin(interaction.user):
             await interaction.followup.send("⛔ 인원 추가/제거는 운영진만 할 수 있어요.", ephemeral=True)
+            return
+        if not collect_enabled():
+            await interaction.followup.send(COLLECT_OFF_TEXT, ephemeral=True)
             return
         record = _closed_record_for_edit(interaction.message)
         if record is None:
@@ -2804,7 +2841,9 @@ def make_attend_embed(boss_name, count, names, boss_time=None, expired=False, lo
         confirmed_names = None
         countdown_text = ""   # 파티 확정 카운트다운
     clan_field_rows = []
-    if confirmed_names is not None:
+    if not collect_enabled():
+        attendee_block = ""   # 인원 수집 꺼짐 → 참석 명단·인원수 숨김
+    elif confirmed_names is not None:
         # 파티 확정 후: 확정/미확정 분리 표시
         confirmed_count = len(confirmed_names.split(", ")) if confirmed_names and confirmed_names != "없음" else 0
         late_count = len(late_names.split(", ")) if late_names and late_names != "없음" else 0
@@ -2832,8 +2871,8 @@ def make_attend_embed(boss_name, count, names, boss_time=None, expired=False, lo
     desc = (
         (f"{time_line}\n" if time_line else "")
         + (f"{status}\n" if status else "")
-        + f"\n{attendee_block}"
-    )
+        + (f"\n{attendee_block}" if attendee_block else "")
+    ).rstrip("\n")
     if countdown_text:
         desc += f"\n\n{countdown_text}"
     if loot:
@@ -3093,7 +3132,9 @@ async def _voice_check_locked(message_id, voice_channel=None) -> tuple | None:
     마감 시 로그 검증에서도 같은 결과가 된다.
     voice_channel 지정(/인원체크를 한 음성채널만 확인) 시에는 다른 채널 인원을 모르므로 추가만 한다.
     접속자가 0명이면 조회 실패일 수 있어 제거하지 않는다.
-    반환: (추가 수, 총원, 제거 수) / 활성 아님 None."""
+    반환: (추가 수, 총원, 제거 수) / 활성 아님·인원 수집 꺼짐 None."""
+    if not collect_enabled():
+        return None
     key = str(message_id)
     info = load_active_messages().get(key)
     if not info:
@@ -3153,8 +3194,16 @@ async def _voice_check_locked(message_id, voice_channel=None) -> tuple | None:
 
     if key not in load_active_messages():
         return len(added), len(attendees), len(removed)   # 그 사이 마감됨 — 마감 화면을 덮지 않는다
+    await _redraw_active_alert(key, ch)
+    return len(added), len(attendees), len(removed)
+
+
+async def _redraw_active_alert(key, ch, msg=None):
+    """진행 중 보스 알림 1건을 active_messages(JSON) 기준으로 다시 그린다 (인원체크·/수집 공용)."""
+    info = load_active_messages().get(str(key)) or {}
     try:
-        msg = await ch.fetch_message(int(key))
+        if msg is None:
+            msg = await ch.fetch_message(int(key))
         # message_id 없이 생성 → 생성자의 Excel 조회(1MB 통합문서 여러 번 로드) 생략, JSON에서만 복원
         view = AttendView(boss_name=info.get("boss_name", ""), boss_time=info.get("boss_time", ""),
                           created_date=info.get("created_date"), loot=info.get("loot", "") or "",
@@ -3175,12 +3224,11 @@ async def _voice_check_locked(message_id, voice_channel=None) -> tuple | None:
                                        content=_boss_alert_content(view.boss_name, view.boss_time))
     except Exception as e:
         log.info(f"[인원체크-메시지 갱신 실패] {key}: {type(e).__name__}: {e}")
-    return len(added), len(attendees), len(removed)
 
 
 def _schedule_voice_check(message_id, spawn_dt):
     """보스 출현 정각에 음성채널 인원체크 1회 예약."""
-    if not VOICE_CHECK_AT_SPAWN or spawn_dt is None:
+    if not VOICE_CHECK_AT_SPAWN or spawn_dt is None or not collect_enabled():
         return
     delay = (spawn_dt - datetime.now()).total_seconds()
     if delay < 0:
@@ -3192,6 +3240,8 @@ def _schedule_voice_check(message_id, spawn_dt):
             async with _alert_lock(message_id):
                 if str(message_id) in _SPAWN_CHECKED:
                     return   # 마감이 먼저 돌며 이미 인원체크함
+                if not collect_enabled():
+                    return   # 예약 뒤 /수집 끄기
                 _SPAWN_CHECKED.add(str(message_id))
                 await _voice_check_locked(message_id)
         except Exception as e:
@@ -3364,8 +3414,8 @@ async def _convert_legacy_alert_format(limit=300):
     """예전 형식(쉼표로 이어진 참석 명단)으로 남아 있는 알림을 혈맹별 칸 형식으로 바꾼다.
     본문에 적힌 명단을 그대로 옮기므로 Excel을 읽지 않고, 보스·시간·득템 등 나머지 내용은 그대로 둔다.
     새 형식 알림은 건드리지 않으니 시작할 때마다 돌아도 같은 결과."""
-    if _clan_split("") is None:
-        return   # 혈맹 구분을 안 쓰는 서버
+    if not collect_enabled() or _clan_split("") is None:
+        return   # 인원 수집 꺼짐(명단 숨김) 또는 혈맹 구분을 안 쓰는 서버
     try:
         ch = bot.get_channel(ALERT_CHANNEL_ID) or await bot.fetch_channel(ALERT_CHANNEL_ID)
     except Exception as e:
@@ -3415,9 +3465,86 @@ async def _convert_legacy_alert_format(limit=300):
         log.info(f"[알림 형식 변환] 예전 알림 {converted}개를 혈맹별 형식으로 바꿨어요")
 
 
+def _closed_time_from_embed(msg):
+    """마감된 알림 embed 의 '🔒 마감됨 HH:MM' 칸(없으면 본문 '마감 HH:MM') → 그날 그 시각."""
+    if not msg.embeds:
+        return None
+    text = ""
+    for f in msg.embeds[0].fields:
+        if (f.name or "").startswith("🔒 마감됨"):
+            text = f.value or ""
+    m = re.search(r"(\d{1,2}:\d{2})", text) or re.search(r"마감 (\d{1,2}:\d{2})", msg.embeds[0].description or "")
+    if not m:
+        return None
+    try:
+        return datetime.strptime(f"{msg.created_at.astimezone():%Y-%m-%d} {m.group(1)}", "%Y-%m-%d %H:%M")
+    except Exception:
+        return None
+
+
+async def _sync_collect_display(limit=300):
+    """인원 수집 플래그에 맞춰 이미 올라간 보스알림·전투지원 알림을 다시 그린다.
+    꺼짐: 인원체크·➕/➖ 버튼과 참석 명단 숨김 / 켜짐: 다시 보이기. 이미 맞는 알림은 건드리지 않는다. 반환: 고친 개수."""
+    on = collect_enabled()
+    fixed = 0
+    try:
+        ch = bot.get_channel(ALERT_CHANNEL_ID) or await bot.fetch_channel(ALERT_CHANNEL_ID)
+    except Exception as e:
+        log.info(f"[수집 표시] 알림 채널 조회 실패: {type(e).__name__}: {e}")
+        ch = None
+    if ch is not None:
+        active = load_active_messages()
+        try:
+            async for msg in ch.history(limit=limit):
+                if msg.author.id != bot.user.id or not msg.embeds or "보스 출현 알림" not in (msg.embeds[0].title or ""):
+                    continue
+                ids = {getattr(c, "custom_id", None) for row in msg.components for c in getattr(row, "children", [])}
+                has_collect = bool(ids & set(COLLECT_BUTTON_IDS))
+                if not ids or has_collect == on:
+                    continue
+                key = str(msg.id)
+                async with _alert_lock(key):
+                    if key in active:
+                        await _redraw_active_alert(key, ch, msg)
+                        fixed += 1
+                        continue
+                    view = AttendView(boss_name=" ", boss_time=" ", loot="", expired=True)
+                    view.message_id = msg.id
+                    try:
+                        record = _find_boss_record_by_id(key)
+                        if record:
+                            _, boss_name, boss_time, _, attendees = record
+                            id2n = _load_id_to_name_mapping()
+                            loot_text, _, _ = load_loot_from_excel(msg.id)
+                            image_file, image_kwargs = _boss_image_file_and_kwargs(boss_name, msg)
+                            embed = make_attend_embed(
+                                boss_name, len(attendees), ", ".join(id2n.get(u, u) for u in attendees) or "없음",
+                                boss_time, expired=True, loot=loot_text or "", disable_time=_closed_time_from_embed(msg),
+                                loot_acquirers=load_loot_acquirers_from_excel(msg.id) or "", **image_kwargs,
+                                attendee_ids=attendees)
+                            await _edit_message_with_image(msg, embed=embed, view=view, image_file=image_file,
+                                                           content=_boss_alert_content(boss_name, boss_time, expired=True))
+                        else:
+                            await msg.edit(view=view)
+                        fixed += 1
+                    except Exception as e:
+                        log.info(f"[수집 표시] {msg.id} 수정 실패: {type(e).__name__}: {e}")
+                await asyncio.sleep(1)   # 디스코드 속도 제한 여유
+        except Exception as e:
+            log.info(f"[수집 표시] 알림 기록 조회 실패: {type(e).__name__}: {e}")
+    try:
+        fixed += await combat_support.sync_collect_display(limit)
+    except Exception as e:
+        log.info(f"[수집 표시] 전투지원 알림 정리 실패: {type(e).__name__}: {e}")
+    if fixed:
+        log.info(f"[수집 표시] 인원 수집 {'켜짐' if on else '꺼짐'}에 맞춰 알림 {fixed}개를 다시 그렸어요")
+    return fixed
+
+
 async def _startup_alert_repairs():
     await _repair_closed_alert_buttons()
     await _convert_legacy_alert_format()
+    await _sync_collect_display()
 
 
 async def _close_sweep_loop():
@@ -3500,6 +3627,7 @@ boss_auction = BossAuction(bot, channel_id=AUCTION_CHANNEL_ID, data_dir=DATA_DIR
                            is_admin=_is_bot_admin, logger=log, currency=AUCTION_CURRENCY,
                            get_attendees=_boss_attendees_for)
 boss_auction.on_board_finished = _apply_board_results
+boss_auction.attendee_only = collect_enabled   # 인원 수집 꺼짐 → 참석 명단이 없으니 입찰은 누구나
 boss_auction.on_change = lambda: schedule_pending_refresh()
 boss_auction.board_defaults = dict(AUCTION_DEFAULTS)
 boss_auction.get_names = lambda: _load_id_to_name_mapping()
@@ -3543,7 +3671,8 @@ def _music_port_for_combat():
 combat_support = rb_combat.CombatSupport(
     bot, config, CLAN_ROLES, DATA_DIR, is_admin=_is_bot_admin, clan_split_ids=lambda ids: _clan_split_ids(ids),
     id_to_name=_load_id_to_name_mapping, update_user_mapping=update_user_mapping,
-    tts_port=_tts_port_for_combat(), music_port=_music_port_for_combat(), logger=log)
+    tts_port=_tts_port_for_combat(), music_port=_music_port_for_combat(), logger=log,
+    collect_enabled=collect_enabled)
 
 
 def _save_boss_config():
@@ -3672,6 +3801,39 @@ async def cmd_manual_boss_alert(interaction: discord.Interaction):
         await interaction.response.send_message(f"보스알림 채널에서 써 주세요 👉 <#{alert_cid}>", ephemeral=True)
         return
     await interaction.response.send_modal(rb_manual.BossAlertModal(_manual_boss_options(), _create_manual_boss_alert))
+
+
+@bot.tree.command(name="수집", description="서버마스터 전용 — 참석 인원 수집(자동 인원체크·수집 버튼·참석 명단)을 켜거나 꺼요")
+@discord.app_commands.describe(동작="켜기 / 끄기 / 상태")
+@discord.app_commands.choices(동작=[discord.app_commands.Choice(name="켜기", value="on"),
+                                  discord.app_commands.Choice(name="끄기", value="off"),
+                                  discord.app_commands.Choice(name="상태", value="status")])
+async def cmd_collect_toggle(interaction: discord.Interaction, 동작: str = "status"):
+    user = interaction.user
+    log.info(f"[명령어] /수집 {동작} | 사용자: {getattr(user, 'display_name', user)}")
+    if 동작 == "status":
+        await interaction.response.send_message(
+            f"👥 인원 수집: **{'켜짐' if collect_enabled() else '꺼짐'}**", ephemeral=True)
+        return
+    want = 동작 == "on"
+    if want == collect_enabled():
+        await interaction.response.send_message(
+            f"👥 인원 수집은 이미 **{'켜짐' if want else '꺼짐'}** 이에요.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    config[COLLECT_KEY] = want
+    _save_boss_config()
+    if want:
+        # 진행 중인 알림의 정각 인원체크를 다시 예약 (이미 지난 알림은 건너뜀)
+        for mid, info in list(load_active_messages().items()):
+            try:
+                spawn_dt = datetime.strptime(f"{info.get('created_date')} {info['boss_time']}", "%Y-%m-%d %H:%M")
+            except Exception:
+                continue
+            _schedule_voice_check(int(mid), spawn_dt)
+    fixed = await _sync_collect_display()
+    await interaction.followup.send(
+        f"👥 인원 수집을 **{'켰어요' if want else '껐어요'}** — 알림 {fixed}개를 다시 그렸어요.", ephemeral=True)
 
 
 @bot.tree.command(name="전파", description="운영진 전용 — 적은 내용을 혈맹 대화방 전체에 음성으로 전달해요")
@@ -5234,7 +5396,7 @@ async def initialize_on_ready():
     bot.add_view(AuctionView(boss_auction))  # 경매 메시지 버튼 재시작 복구
     bot.add_view(BoardView(boss_auction))  # 경매 진행판 버튼 재시작 복구
     bot.add_view(PendingListView())  # 📌 경매 대기 목록 버튼 재시작 복구
-    bot.add_view(rb_combat.CombatView(combat_support))  # ⚔️ 전투지원 알림 버튼 재시작 복구
+    bot.add_view(rb_combat.CombatView(combat_support, persistent=True))  # ⚔️ 전투지원 알림 버튼 재시작 복구
     bot.add_view(rb_verify.VerifyView(verifier))  # 🔐 #인증 비밀번호 입력 버튼 재시작 복구
     try:
         from RaidBook_channel_setup import resolve_guild
@@ -5484,6 +5646,9 @@ async def _active_boss_autocomplete(interaction: discord.Interaction, current: s
 @discord.app_commands.autocomplete(message_id=_active_boss_autocomplete)
 async def voicecheck(ctx, message_id: str = None):
     """명령을 입력한 음성채널의 접속자를 진행 중인 보스 알림에 참석 처리. 예: /인원체크 / /인원체크 보스:카스파"""
+    if not collect_enabled():
+        await ctx.send(COLLECT_OFF_TEXT, ephemeral=True)
+        return
     # 음성채널 채팅에서 입력 → 그 음성채널, 아니면 입력자가 접속 중인 음성채널
     vc = ctx.channel if isinstance(ctx.channel, (discord.VoiceChannel, discord.StageChannel)) else None
     if vc is None and isinstance(ctx.author, discord.Member) and ctx.author.voice:
