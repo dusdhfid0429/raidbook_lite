@@ -24,6 +24,7 @@ def add_missing_roles(raw, roles=DEFAULT_CLAN_ROLES) -> tuple:
     return raw + added, [r["role"] for r in added]
 UNASSIGNED_LABEL = "❔ 미지정"
 BOTH_ROLES_MARK = " ⚠️"
+STAFF_SUFFIX = "운영진"
 
 
 def parse_clan_roles(raw) -> list:
@@ -64,7 +65,8 @@ def group_by_clan(names, clan_roles, roles_of, label_of=None) -> tuple:
             roles = set(roles_of(person) or ())
         except Exception:
             roles = set()
-        hits = [i for i, (name, _) in enumerate(clan_roles) if name in roles]
+        # '정도운영진'처럼 혈맹 운영진 역할만 있어도 그 혈맹으로 본다 (혈맹 역할을 안 받은 운영진)
+        hits = [i for i, (name, _) in enumerate(clan_roles) if name in roles or f"{name}{STAFF_SUFFIX}" in roles]
         label = label_of(person) if label_of else person
         if not hits:
             unassigned.append(label)
